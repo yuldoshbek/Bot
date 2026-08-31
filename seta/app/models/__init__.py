@@ -3,15 +3,20 @@ from app.models.base import Base
 from app.models.enums import (
     AbsenceKind,
     Availability,
+    ExtensionStatus,
     MeetingStatus,
     MeetingVisibility,
+    NotificationPriority,
+    NotificationStatus,
     Priority,
     RequestStatus,
     RoleCode,
     Scope,
+    TaskEventKind,
     TaskStatus,
     UserStatus,
 )
+from app.models.notification import Notification
 from app.models.org import Department, Organization
 from app.models.rbac import Delegation, Permission, Role, RolePermission, UserRole
 from app.models.schedule import (
@@ -22,6 +27,7 @@ from app.models.schedule import (
     Holiday,
     WorkingHours,
 )
+from app.models.task import Task, TaskComment, TaskEvent, TaskExtension, TaskTemplate
 from app.models.user import Invite, User
 
 __all__ = [
@@ -42,11 +48,21 @@ __all__ = [
     "Absence",
     "Holiday",
     "AuditLog",
+    "Task",
+    "TaskEvent",
+    "TaskComment",
+    "TaskExtension",
+    "TaskTemplate",
+    "Notification",
     "RoleCode",
     "UserStatus",
     "Availability",
     "TaskStatus",
+    "TaskEventKind",
+    "ExtensionStatus",
     "Priority",
+    "NotificationStatus",
+    "NotificationPriority",
     "MeetingStatus",
     "MeetingVisibility",
     "RequestStatus",

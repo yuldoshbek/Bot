@@ -12,6 +12,10 @@ services:
     volumes:
       - .:/app
 
+  worker:
+    volumes:
+      - .:/app
+
   api:
     volumes:
       - .:/app

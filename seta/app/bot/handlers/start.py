@@ -27,6 +27,7 @@ from app.services.availability import get_view
 from app.services.rbac import ELEVATED_ROLES, ROLE_TITLES, user_role_codes
 from app.services.registration import (
     RegistrationError,
+    has_any_admin,
     list_departments,
     resolve_invite,
     set_phone,
@@ -154,13 +155,17 @@ async def ask_role_or_contact(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(Reg.role, F.data.startswith("reg:role:"))
-async def reg_role(call: CallbackQuery, state: FSMContext) -> None:
+async def reg_role(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession, organization: Organization
+) -> None:
     role = RoleCode(call.data.rsplit(":", 1)[1])
     await state.update_data(requested_role=role)
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer()
 
-    if role in ELEVATED_ROLES:
+    # Про подтверждение говорим, только если подтверждать действительно есть кому:
+    # в пустой системе первый вошедший получает доступ сразу.
+    if role in ELEVATED_ROLES and await has_any_admin(session, organization.id):
         await call.message.answer(
             f"Роль «{ROLE_TITLES[role]}» подтверждает администратор — это займёт немного времени."
         )

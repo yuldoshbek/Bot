@@ -77,3 +77,41 @@ class Scope(StrEnum):
     DEPARTMENT = "DEPARTMENT"
     SUBORDINATES = "SUBORDINATES"
     ORGANIZATION = "ORGANIZATION"
+
+
+class TaskEventKind(StrEnum):
+    """Что именно произошло с поручением."""
+    CREATED = "CREATED"
+    ACCEPTED = "ACCEPTED"
+    STARTED = "STARTED"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    RETURNED = "RETURNED"          # возврат на доработку
+    COMPLETED = "COMPLETED"
+    BLOCKED = "BLOCKED"
+    UNBLOCKED = "UNBLOCKED"
+    CANCELLED = "CANCELLED"
+    OVERDUE = "OVERDUE"
+    DUE_CHANGED = "DUE_CHANGED"
+    REASSIGNED = "REASSIGNED"
+    COMMENTED = "COMMENTED"
+    ESCALATED = "ESCALATED"
+
+
+class ExtensionStatus(StrEnum):
+    NEW = "NEW"
+    APPROVED = "APPROVED"
+    DECLINED = "DECLINED"
+
+
+class NotificationStatus(StrEnum):
+    PENDING = "PENDING"
+    SENT = "SENT"
+    FAILED = "FAILED"
+    SUPPRESSED = "SUPPRESSED"      # получатель отключил уведомления
+
+
+class NotificationPriority(StrEnum):
+    LOW = "LOW"                    # копится в сводку
+    NORMAL = "NORMAL"              # ждёт окончания тихих часов
+    CRITICAL = "CRITICAL"          # уходит немедленно, тихие часы не действуют

@@ -10,3 +10,4 @@ redis>=5.2
 arq>=0.26
 python-dateutil>=2.9
 structlog>=24.4
+tzdata>=2024.1

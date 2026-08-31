@@ -10,12 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import (
-    BTN_CONTROL,
     BTN_HELP,
     BTN_MY_DAY,
     BTN_MY_MEETINGS,
-    BTN_MY_TASKS,
-    BTN_NEW_TASK,
     BTN_PROFILE,
     BTN_REQUEST_MEETING,
     main_menu,
@@ -31,9 +28,6 @@ from app.services.rbac import ROLE_TITLES
 router = Router(name="menu")
 
 COMING_SOON = {
-    BTN_MY_TASKS: ("Поручения", 2),
-    BTN_NEW_TASK: ("Создание поручений", 2),
-    BTN_CONTROL: ("Контроль исполнения", 2),
     BTN_MY_MEETINGS: ("Встречи", 3),
     BTN_REQUEST_MEETING: ("Запрос встречи", 3),
     BTN_MY_DAY: ("Мой день", 3),
@@ -89,8 +83,9 @@ async def help_message(message: Message, roles: set[RoleCode]) -> None:
         "",
         "Система ведёт встречи, поручения и контроль их исполнения.",
         "",
-        "Сейчас работает: регистрация, роли и права, профиль, индикатор доступности.",
-        "Дальше по плану: поручения и контроль (блок 2), календарь и встречи (блок 3).",
+        "Сейчас работает: регистрация и права, поручения со сроками и контролем,",
+        "напоминания и эскалация, индикатор доступности.",
+        "Дальше по плану: календарь и встречи (блок 3).",
         "",
         "Команды: /start — главное меню, /help — эта справка, /id — ваш Telegram ID.",
     ]
@@ -109,5 +104,5 @@ async def coming_soon(message: Message) -> None:
     title, block = COMING_SOON[message.text]
     await message.answer(
         f"Раздел «{title}» появится в блоке {block}.\n"
-        "Сейчас работает ядро: регистрация, роли, права, доступность."
+        "Сейчас работают поручения: создание, сроки, напоминания, проверка."
     )

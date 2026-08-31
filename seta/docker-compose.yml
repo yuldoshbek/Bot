@@ -54,6 +54,19 @@ services:
     volumes:
       - ./storage:/app/storage
 
+  worker:
+    build: .
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.workers.runner"]
+    restart: unless-stopped
+
   api:
     build: .
     env_file: .env
