@@ -170,10 +170,13 @@ docker compose logs -f bot
 cd seta
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block1.py
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/smoke_block2.py
 ```
 
-26 сценариев, включая попытки обратиться к чужим данным и получить повышенную роль
-по пересланной ссылке. Ожидается `Ошибок: 0`.
+**34 и 52 сценария.** Проверяются не только успешные пути, но и отказы: обращение
+к чужим данным, повышенная роль по пересланной ссылке, перенос срока назад,
+закрытие поручения мимо проверки. Ожидается `Ошибок: 0`.
 
 ---
 
