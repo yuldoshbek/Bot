@@ -11,13 +11,14 @@
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models.enums import RoleCode, UserStatus
 from app.models.org import Department, Organization
+from app.models.rbac import Role, UserRole
 from app.models.user import Invite, User
 from app.services.audit import write_audit
 from app.services.bootstrap import ensure_default_working_hours, grant_role
@@ -95,6 +96,21 @@ async def get_user_by_telegram_id(session: AsyncSession, telegram_user_id: int) 
     ).scalar_one_or_none()
 
 
+async def has_any_admin(session: AsyncSession, organization_id: int) -> bool:
+    """Есть ли в организации хотя бы один действующий администратор."""
+    count = await session.scalar(
+        select(func.count(UserRole.id))
+        .join(Role, Role.id == UserRole.role_id)
+        .join(User, User.id == UserRole.user_id)
+        .where(
+            Role.code == RoleCode.ADMIN,
+            User.organization_id == organization_id,
+            User.status == UserStatus.ACTIVE,
+        )
+    )
+    return bool(count)
+
+
 async def start_registration(
     session: AsyncSession,
     *,
@@ -121,6 +137,13 @@ async def start_registration(
         not invite.is_multi_use or effective_role not in ELEVATED_ROLES
     )
 
+    # Пустая система: подтверждать заявку некому. Первый вошедший становится
+    # администратором - иначе система замыкается сама на себе и в неё не войти.
+    # Условие проверяется до создания записи и срабатывает ровно один раз.
+    is_first_admin = not await has_any_admin(session, organization.id)
+    if is_first_admin:
+        auto_approve = True
+
     user = User(
         organization_id=organization.id,
         telegram_user_id=telegram_user_id,
@@ -140,6 +163,11 @@ async def start_registration(
     if auto_approve:
         await grant_role(session, user, effective_role, granted_by=invite.created_by if invite else None)
 
+    if is_first_admin:
+        # Роль администратора добавляется к запрошенной, а не вместо неё:
+        # первый человек в системе обычно и ассистент, и её настройщик.
+        await grant_role(session, user, RoleCode.ADMIN)
+
     if invite is not None:
         invite.used_count += 1
 
@@ -154,6 +182,7 @@ async def start_registration(
             "requested_role": effective_role,
             "department_id": user.department_id,
             "auto_approved": auto_approve,
+            "first_admin": is_first_admin,
             "invite_token": invite.token if invite else None,
         },
     )

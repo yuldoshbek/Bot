@@ -218,10 +218,17 @@ async def reg_contact(
 
     if user.status == UserStatus.ACTIVE:
         roles = await user_role_codes(session, user)
-        await message.answer(
-            f"Готово, {user.full_name}. Вы в системе.",
-            reply_markup=main_menu(roles),
-        )
+        text = f"Готово, {user.full_name}. Вы в системе."
+        if RoleCode.ADMIN in roles:
+            text += (
+                "\n\nВы первый в системе, поэтому вам выдана роль "
+                "<b>администратора</b> — подтверждать заявки было бы некому.\n\n"
+                "С чего начать:\n"
+                "1. «🛠 Администрирование» → «Отделы» — заведите подразделения\n"
+                "2. «Ссылки-приглашения» — отправьте ссылку в чат отдела\n"
+                "3. Руководителю дайте зарегистрироваться и подтвердите его заявку"
+            )
+        await message.answer(text, reply_markup=main_menu(roles))
         return
 
     await message.answer(

@@ -1,8 +1,13 @@
 """Проверка блока 1 без Telegram.
 
 Прогоняет живой сценарий по базе: регистрация тремя путями, подтверждение
-администратором, проверка прав на уровне записи, индикатор доступности,
-журнал аудита. Запускается на пустой или уже наполненной базе.
+администратором, права на уровне записи, индикатор доступности, журнал аудита,
+правило первого администратора.
+
+ИЗОЛЯЦИЯ. Все тестовые данные живут в отдельных организациях с названием
+"ТЕСТ ...". Уборка удаляет только их. Боевая организация и настоящие сотрудники
+недосягаемы для этого скрипта — по идентификаторам Telegram ничего не удаляется,
+потому что реальный ID сотрудника может попасть в любой числовой диапазон.
 
     docker compose -f docker-compose.yml -f docker-compose.dev.yml \
         run --rm --no-deps migrate python scripts/smoke_block1.py
@@ -28,6 +33,7 @@ from app.models import (
     Delegation,
     Department,
     Invite,
+    Organization,
     RoleCode,
     User,
     UserRole,
@@ -35,16 +41,18 @@ from app.models import (
     WorkingHours,
 )
 from app.services.availability import get_view, open_executives, set_state
-from app.services.bootstrap import bootstrap
-from app.services.rbac import can_access_object, load_grants, scope_of
+from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
+from app.services.rbac import can_access_object, load_grants, scope_of, user_role_codes
 from app.services.registration import (
     approve_user,
     create_invite,
+    has_any_admin,
     list_departments,
     pending_users,
     start_registration,
 )
 
+TEST_ORG_PREFIX = "ТЕСТ "
 TEST_TG_BASE = 900_000_000
 passed = 0
 failed = 0
@@ -61,35 +69,76 @@ def check(condition: bool, title: str, detail: str = "") -> None:
 
 
 async def cleanup() -> None:
-    """Убирает данные предыдущего прогона, не трогая настоящих сотрудников."""
+    """Удаляет только тестовые организации и всё, что к ним привязано."""
     async with session_scope() as session:
-        rows = await session.execute(
-            select(User.id).where(User.telegram_user_id >= TEST_TG_BASE)
-        )
-        ids = [row[0] for row in rows.all()]
-        if ids:
+        org_ids = [
+            row[0]
+            for row in (
+                await session.execute(
+                    select(Organization.id).where(Organization.name.like(f"{TEST_ORG_PREFIX}%"))
+                )
+            ).all()
+        ]
+        if not org_ids:
+            return
+
+        user_ids = [
+            row[0]
+            for row in (
+                await session.execute(select(User.id).where(User.organization_id.in_(org_ids)))
+            ).all()
+        ]
+        if user_ids:
             for model in (
                 UserRole, WorkingHours, AvailabilityState, AvailabilityLog,
                 CalendarBlock, Absence,
             ):
-                await session.execute(delete(model).where(model.user_id.in_(ids)))
+                await session.execute(delete(model).where(model.user_id.in_(user_ids)))
             await session.execute(
                 delete(Delegation).where(
-                    (Delegation.from_user_id.in_(ids)) | (Delegation.to_user_id.in_(ids))
+                    (Delegation.from_user_id.in_(user_ids))
+                    | (Delegation.to_user_id.in_(user_ids))
                 )
             )
-            await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(ids)))
-            await session.execute(delete(AuditLog).where(AuditLog.on_behalf_of_id.in_(ids)))
-            await session.execute(delete(Invite).where(Invite.created_by.in_(ids)))
-            await session.execute(delete(User).where(User.id.in_(ids)))
-        await session.execute(delete(Department).where(Department.name.like("ТЕСТ %")))
+            await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(user_ids)))
+            await session.execute(delete(AuditLog).where(AuditLog.on_behalf_of_id.in_(user_ids)))
+            await session.execute(delete(User).where(User.id.in_(user_ids)))
+
+        await session.execute(delete(Invite).where(Invite.organization_id.in_(org_ids)))
+        await session.execute(delete(Department).where(Department.organization_id.in_(org_ids)))
+        await session.execute(delete(Organization).where(Organization.id.in_(org_ids)))
+
+
+async def make_test_org(session, name: str) -> Organization:
+    org = Organization(name=f"{TEST_ORG_PREFIX}{name}", timezone="Asia/Tashkent")
+    session.add(org)
+    await session.flush()
+    return org
 
 
 async def main() -> None:
     await cleanup()
 
     async with session_scope() as session:
-        org = await bootstrap(session)
+        # Справочники ролей и прав общие для всей базы.
+        await bootstrap(session)
+
+        org = await make_test_org(session, "Организация")
+
+        # Администратор нужен сразу: иначе сработает правило первого вошедшего
+        # и первый же сотрудник получит административные права.
+        admin = User(
+            organization_id=org.id,
+            telegram_user_id=TEST_TG_BASE,
+            full_name="ТЕСТ Администратор",
+            status=UserStatus.ACTIVE,
+            timezone="Asia/Tashkent",
+            locale="ru",
+        )
+        session.add(admin)
+        await session.flush()
+        await ensure_default_working_hours(session, admin)
+        await grant_role(session, admin, RoleCode.ADMIN)
 
         print("\n1. Отделы и ссылки-приглашения")
         finance = Department(organization_id=org.id, name="ТЕСТ Финансы")
@@ -98,26 +147,16 @@ async def main() -> None:
         await session.flush()
 
         dept_link = await create_invite(
-            session,
-            organization_id=org.id,
-            created_by=None,
-            role=RoleCode.EMPLOYEE,
-            department_id=finance.id,
-            label="ТЕСТ Финансы — сотрудники",
-            multi_use=True,
-            max_uses=50,
-            ttl_hours=None,
+            session, organization_id=org.id, created_by=admin.id,
+            role=RoleCode.EMPLOYEE, department_id=finance.id,
+            label="ТЕСТ Финансы — сотрудники", multi_use=True, max_uses=50, ttl_hours=None,
         )
         personal_link = await create_invite(
-            session,
-            organization_id=org.id,
-            created_by=None,
-            role=RoleCode.EXECUTIVE,
-            department_id=None,
-            label="ТЕСТ Руководитель",
-            multi_use=False,
+            session, organization_id=org.id, created_by=admin.id,
+            role=RoleCode.EXECUTIVE, department_id=None,
+            label="ТЕСТ Руководитель", multi_use=False,
         )
-        check(len(await list_departments(session, org.id)) >= 2, "отделы созданы")
+        check(len(await list_departments(session, org.id)) == 2, "отделы созданы")
 
         print("\n2. Регистрация по ссылке отдела — доступ сразу")
         ivanov = await start_registration(
@@ -127,6 +166,10 @@ async def main() -> None:
         )
         check(ivanov.status == UserStatus.ACTIVE, "сотрудник активирован без подтверждения")
         check(ivanov.department_id == finance.id, "отдел взят из ссылки")
+        check(
+            RoleCode.ADMIN not in await user_role_codes(session, ivanov),
+            "обычный сотрудник не получает административных прав",
+        )
 
         print("\n3. Свободная заявка на повышенную роль — только через подтверждение")
         petrov = await start_registration(
@@ -140,7 +183,7 @@ async def main() -> None:
 
         print("\n4. Многоразовую ссылку нельзя использовать для повышенной роли")
         leaked = await create_invite(
-            session, organization_id=org.id, created_by=None,
+            session, organization_id=org.id, created_by=admin.id,
             role=RoleCode.DEPT_HEAD, department_id=projects.id,
             label="ТЕСТ утечка", multi_use=True, max_uses=10, ttl_hours=None,
         )
@@ -166,8 +209,8 @@ async def main() -> None:
 
         print("\n6. Подтверждение заявки администратором")
         queue = await pending_users(session, org.id)
-        check(len(queue) >= 2, "заявки видны администратору", f"в очереди: {len(queue)}")
-        await approve_user(session, user=petrov, role=RoleCode.DEPT_HEAD, approved_by=rakhimov.id)
+        check(len(queue) == 2, "заявки видны администратору", f"в очереди: {len(queue)}")
+        await approve_user(session, user=petrov, role=RoleCode.DEPT_HEAD, approved_by=admin.id)
         check(petrov.status == UserStatus.ACTIVE, "после подтверждения доступ открыт")
 
         print("\n7. Права на уровне записи")
@@ -210,9 +253,8 @@ async def main() -> None:
             note="Кабинет 402", opens_late_slots=False,
         )
         check(view.is_open, "статус «принимаю» включён")
-        visible = await open_executives(session, org.id)
         check(
-            any(u.id == rakhimov.id for u, _ in visible),
+            any(u.id == rakhimov.id for u, _ in await open_executives(session, org.id)),
             "сотрудники видят, кто на связи",
         )
 
@@ -223,9 +265,8 @@ async def main() -> None:
         ).scalar_one()
         state_row.until_at = utcnow() - timedelta(minutes=1)
         await session.flush()
-        expired = await get_view(session, rakhimov.id)
         check(
-            expired.state == Availability.OFFLINE,
+            (await get_view(session, rakhimov.id)).state == Availability.OFFLINE,
             "истёкший статус снимается сам, без ручного выключения",
         )
         check(
@@ -237,8 +278,10 @@ async def main() -> None:
             session, user=rakhimov, state=Availability.OPEN, minutes=120,
             note="Поздний приём", opens_late_slots=True,
         )
-        late = await get_view(session, rakhimov.id)
-        check(late.opens_late_slots, "поздний приём открывает окна после рабочего дня")
+        check(
+            (await get_view(session, rakhimov.id)).opens_late_slots,
+            "поздний приём открывает окна после рабочего дня",
+        )
 
         print("\n9. Рабочее время и журнал")
         hours = (
@@ -265,7 +308,7 @@ async def main() -> None:
 
         actions = await session.execute(
             select(AuditLog.action, func.count(AuditLog.id))
-            .where(AuditLog.actor_id.in_([ivanov.id, petrov.id, rakhimov.id]))
+            .where(AuditLog.actor_id.in_([ivanov.id, petrov.id, rakhimov.id, admin.id]))
             .group_by(AuditLog.action)
         )
         logged = dict(actions.all())
@@ -273,8 +316,54 @@ async def main() -> None:
         check("user.approve" in logged, "подтверждение записано в журнал")
         check("availability.set" in logged, "переключение доступности записано в журнал")
 
-    print(f"\n{'=' * 46}\nПройдено: {passed}   Ошибок: {failed}\n{'=' * 46}")
+        print("\n10. Пустая система: первый вошедший становится администратором")
+        empty_org = await make_test_org(session, "Организация без админа")
+        check(not await has_any_admin(session, empty_org.id), "в новой организации администраторов нет")
+
+        founder = await start_registration(
+            session, organization=empty_org, telegram_user_id=TEST_TG_BASE + 5,
+            telegram_username="founder", full_name="Каримов Карим",
+            department_id=None, requested_role=RoleCode.ASSISTANT, invite=None,
+        )
+        founder_roles = await user_role_codes(session, founder)
+        check(founder.status == UserStatus.ACTIVE, "первый вошедший активирован сразу")
+        check(RoleCode.ADMIN in founder_roles, "первому выдана роль администратора")
+        check(
+            RoleCode.ASSISTANT in founder_roles,
+            "запрошенная роль сохранена вместе с административной",
+        )
+
+        second = await start_registration(
+            session, organization=empty_org, telegram_user_id=TEST_TG_BASE + 6,
+            telegram_username="second", full_name="Назаров Назар",
+            department_id=None, requested_role=RoleCode.ASSISTANT, invite=None,
+        )
+        check(
+            second.status == UserStatus.PENDING,
+            "второй уже проходит подтверждение — правило срабатывает один раз",
+        )
+
+    print("\n11. Уборка не трогает боевые данные")
+    async with session_scope() as session:
+        real_before = await session.scalar(
+            select(func.count(User.id)).where(
+                User.organization_id.notin_(
+                    select(Organization.id).where(Organization.name.like(f"{TEST_ORG_PREFIX}%"))
+                )
+            )
+        )
     await cleanup()
+    async with session_scope() as session:
+        real_after = await session.scalar(select(func.count(User.id)))
+        test_left = await session.scalar(
+            select(func.count(Organization.id)).where(
+                Organization.name.like(f"{TEST_ORG_PREFIX}%")
+            )
+        )
+    check(real_after == real_before, "настоящие сотрудники не удалены", f"{real_before} → {real_after}")
+    check(test_left == 0, "тестовые организации убраны")
+
+    print(f"\n{'=' * 46}\nПройдено: {passed}   Ошибок: {failed}\n{'=' * 46}")
     sys.exit(1 if failed else 0)
 
 
