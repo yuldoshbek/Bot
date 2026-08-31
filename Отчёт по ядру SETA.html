@@ -1,0 +1,313 @@
+<title>Отчёт по ядру SETA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Literata:opsz,wght@7..72,400;7..72,500;7..72,600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+<style>
+:root{
+  --bg:#F3F6F5; --surface:#FFFFFF; --surface-2:#EAF0EF;
+  --ink:#0F1F1E; --ink-2:#3B4E4C; --ink-3:#6C807E;
+  --line:#D4DEDC; --line-2:#B6C5C3;
+  --accent:#0E6B6B; --accent-soft:#DDEDEC; --on-accent:#FFFFFF;
+  --s-new:#2A66C8; --s-prog:#9C7413; --s-attn:#BC5F26;
+  --s-done:#26714B; --s-late:#B23731; --s-off:#71827F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0B1110; --surface:#121A19; --surface-2:#182221;
+    --ink:#E6EDEB; --ink-2:#AEC0BD; --ink-3:#7E918E;
+    --line:#25322F; --line-2:#344643;
+    --accent:#43B5AF; --accent-soft:#12302E; --on-accent:#06201F;
+    --s-new:#77ACF7; --s-prog:#DCB253; --s-attn:#E8945F;
+    --s-done:#5CBA88; --s-late:#E87A72; --s-off:#8FA29F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0B1110; --surface:#121A19; --surface-2:#182221;
+  --ink:#E6EDEB; --ink-2:#AEC0BD; --ink-3:#7E918E;
+  --line:#25322F; --line-2:#344643;
+  --accent:#43B5AF; --accent-soft:#12302E; --on-accent:#06201F;
+  --s-new:#77ACF7; --s-prog:#DCB253; --s-attn:#E8945F;
+  --s-done:#5CBA88; --s-late:#E87A72; --s-off:#8FA29F;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Literata",Georgia,serif;font-size:16.5px;line-height:1.68;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4,th,.ui{font-family:"Golos Text","Segoe UI",system-ui,sans-serif}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;font-size:.87em}
+.wrap{max-width:900px;margin:0 auto;padding:0 clamp(16px,4vw,40px)}
+p{margin:0 0 15px;max-width:68ch}
+ul{margin:0 0 15px;padding-left:1.2em;max-width:68ch}
+li{margin:0 0 6px}
+li::marker{color:var(--ink-3)}
+a{color:var(--accent)}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+.masthead{border-bottom:1px solid var(--line);background:var(--surface);padding:clamp(34px,6vw,64px) 0 clamp(26px,4vw,38px)}
+.eyebrow{font-family:"Golos Text",system-ui,sans-serif;font-size:11.5px;font-weight:600;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+h1{font-size:clamp(31px,5.6vw,52px);line-height:1.05;font-weight:700;letter-spacing:-.02em;margin:0 0 16px;text-wrap:balance}
+.lede{font-size:clamp(16.5px,2vw,19px);color:var(--ink-2);max-width:62ch;margin:0 0 26px}
+.meta{display:flex;flex-wrap:wrap;gap:8px 26px;font-family:"Golos Text",system-ui,sans-serif;
+  font-size:13px;color:var(--ink-3);border-top:1px solid var(--line);padding-top:16px}
+.meta b{color:var(--ink-2);font-weight:600}
+
+main{padding:38px 0 80px}
+section{margin:0 0 clamp(42px,6vw,68px)}
+.shead{display:flex;align-items:baseline;gap:14px;border-top:2px solid var(--ink);padding-top:14px;margin-bottom:20px}
+.shead .num{font-family:"Golos Text",system-ui,sans-serif;font-size:12px;font-weight:700;
+  color:var(--accent);letter-spacing:.06em;font-variant-numeric:tabular-nums;padding-top:6px}
+h2{font-size:clamp(22px,3.2vw,29px);line-height:1.16;font-weight:700;letter-spacing:-.015em;margin:0;text-wrap:balance}
+h3{font-size:17px;font-weight:600;margin:30px 0 10px}
+
+.scoreboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin:26px 0}
+.stat{background:var(--surface);padding:16px 14px}
+.stat .v{font-family:"Golos Text",system-ui,sans-serif;font-size:27px;font-weight:700;
+  line-height:1;color:var(--accent);font-variant-numeric:tabular-nums}
+.stat .l{font-family:"Golos Text",system-ui,sans-serif;font-size:11.5px;color:var(--ink-3);margin-top:7px;line-height:1.3}
+.stat.good .v{color:var(--s-done)}
+
+.tw{overflow-x:auto;margin:18px 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-family:"Golos Text",system-ui,sans-serif;font-size:14px;min-width:500px}
+th{text-align:left;font-weight:600;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);padding:11px 14px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink-2);line-height:1.5}
+tbody tr:last-child td{border-bottom:none}
+td b{color:var(--ink);font-weight:600}
+table code{background:var(--surface-2);padding:1px 5px;border-radius:3px;color:var(--ink)}
+
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:"Golos Text",system-ui,sans-serif;
+  font-size:12px;font-weight:600;padding:2px 9px;border-radius:100px;white-space:nowrap;border:1px solid}
+.chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.c-done{color:var(--s-done);border-color:color-mix(in srgb,var(--s-done) 35%,transparent);background:color-mix(in srgb,var(--s-done) 10%,var(--surface))}
+.c-prog{color:var(--s-prog);border-color:color-mix(in srgb,var(--s-prog) 35%,transparent);background:color-mix(in srgb,var(--s-prog) 10%,var(--surface))}
+.c-new{color:var(--s-new);border-color:color-mix(in srgb,var(--s-new) 35%,transparent);background:color-mix(in srgb,var(--s-new) 10%,var(--surface))}
+.c-late{color:var(--s-late);border-color:color-mix(in srgb,var(--s-late) 35%,transparent);background:color-mix(in srgb,var(--s-late) 10%,var(--surface))}
+
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);padding:14px 18px;margin:20px 0;border-radius:0 var(--radius) var(--radius) 0}
+.note p{margin:0;max-width:none}
+.warn{border-left-color:var(--s-attn);background:color-mix(in srgb,var(--s-attn) 9%,var(--surface))}
+
+.checks{list-style:none;padding:0;margin:16px 0;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:0 24px}
+.checks li{display:grid;grid-template-columns:20px 1fr;gap:9px;padding:7px 0;border-bottom:1px solid var(--line);
+  margin:0;font-size:14.5px;color:var(--ink-2);font-family:"Golos Text",system-ui,sans-serif}
+.checks .m{color:var(--s-done);font-weight:700}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:14px;margin:20px 0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:17px}
+.card h4{margin:0 0 7px;font-size:15px;color:var(--ink)}
+.card p{margin:0;font-size:14.5px;color:var(--ink-2);line-height:1.55;max-width:none}
+.card .tag{display:inline-block;font-family:"Golos Text",system-ui,sans-serif;font-size:10.5px;
+  font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+
+.steps{list-style:none;padding:0;margin:20px 0;display:flex;flex-direction:column;gap:10px}
+.steps li{display:grid;grid-template-columns:26px 1fr;gap:12px;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:0}
+.steps .n{font-family:"Golos Text",system-ui,sans-serif;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
+.steps b{font-family:"Golos Text",system-ui,sans-serif;font-size:14.5px;display:block;margin-bottom:2px}
+.steps span{font-size:14px;color:var(--ink-2)}
+
+pre{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius);
+  padding:13px 15px;overflow-x:auto;margin:16px 0;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+
+footer{border-top:1px solid var(--line);padding:24px 0 56px;color:var(--ink-3);font-size:13.5px;font-family:"Golos Text",system-ui,sans-serif}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Отчёт о выполненных работах</p>
+    <h1>Ядро SETA построено и проверено</h1>
+    <p class="lede">Блок 1 из 6 завершён: регистрация сотрудников, права доступа, индикатор доступности руководителя, журнал аудита и администрирование внутри Telegram.</p>
+    <div class="meta">
+      <span><b>Дата:</b> 31 августа 2026</span>
+      <span><b>Блок:</b> 1 из 6</span>
+      <span><b>Репозиторий:</b> github.com/yuldoshbek/Bot</span>
+      <span><b>Статус:</b> готово к запуску с боевым токеном</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap"><main>
+
+<div class="scoreboard">
+  <div class="stat"><div class="v">4</div><div class="l">раунда разбора требований</div></div>
+  <div class="stat"><div class="v">16</div><div class="l">решений зафиксировано</div></div>
+  <div class="stat"><div class="v">59</div><div class="l">файлов в репозитории</div></div>
+  <div class="stat"><div class="v">16</div><div class="l">таблиц базы данных</div></div>
+  <div class="stat"><div class="v">28</div><div class="l">прав доступа</div></div>
+  <div class="stat good"><div class="v">26</div><div class="l">проверок пройдено</div></div>
+  <div class="stat good"><div class="v">0</div><div class="l">ошибок</div></div>
+</div>
+
+<!-- 1 -->
+<section>
+  <div class="shead"><span class="num">01</span><h2>Что было сделано</h2></div>
+  <p>Работа шла в пять этапов. Каждый следующий опирался на результат предыдущего, а не начинался параллельно.</p>
+
+  <ol class="steps">
+    <li><span class="n">1</span><span><b>Разбор требований</b><span>Четыре раунда вопросов по всем ветвям решений: стек, хранилище, хостинг, ИИ, регистрация, права, календарные правила, эскалация, администрирование, порядок работ. Ни одно решение не принято по умолчанию.</span></span></li>
+    <li><span class="n">2</span><span><b>Документ архитектуры</b><span>19 разделов: схема системы, модель данных на 38 таблиц, матрица прав, ИИ-контур, 15 показателей аналитики, 20 функций, план на 14 недель, риски. Документ пригоден для показа руководству и IT-службе.</span></span></li>
+    <li><span class="n">3</span><span><b>Разработка ядра</b><span>Каркас проекта, база, права, регистрация, индикатор доступности, администрирование в боте, журнал аудита. 38 файлов исходного кода.</span></span></li>
+    <li><span class="n">4</span><span><b>Проверка на живой базе</b><span>26 сценариев, включая попытки обратиться к чужим данным и получить повышенную роль обходным путём. Все пройдены.</span></span></li>
+    <li><span class="n">5</span><span><b>Репозиторий и память проекта</b><span>Код залит на GitHub. Добавлена папка <code>agent/</code> — любой ИИ-агент подхватывает проект без пересказа истории.</span></span></li>
+  </ol>
+</section>
+
+<!-- 2 -->
+<section>
+  <div class="shead"><span class="num">02</span><h2>Что теперь работает</h2></div>
+
+  <h3>Регистрация — ни одного сотрудника не заводят вручную</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Путь</th><th>Как выглядит</th><th>Роль</th></tr></thead>
+    <tbody>
+      <tr><td><b>Ссылка отдела</b></td><td>Администратор отправляет одну ссылку в чат отдела</td><td>«Сотрудник» выдаётся сразу, подтверждать не нужно</td></tr>
+      <tr><td><b>Свободная заявка</b></td><td>Человек сам открывает бота, вводит имя и выбирает роль</td><td>Администратору приходит карточка с кнопкой «Принять»</td></tr>
+      <tr><td><b>Личное приглашение</b></td><td>Одноразовая ссылка под конкретного человека, 72 часа</td><td>Любая роль выдаётся сразу</td></tr>
+    </tbody>
+  </table></div>
+  <p>Завершающий шаг всегда один — подтверждение номера телефона штатной кнопкой Telegram. Общая ссылка на бота без приглашения ведёт на экран «Обратитесь к администратору».</p>
+
+  <div class="note warn"><p><b>Закрыта дыра, которая была в исходной идее.</b> Роль, выбранная пользователем самому себе, не даёт никаких прав до подтверждения. Иначе любой сотрудник выбрал бы «Начальник отдела» и увидел поручения всего подразделения. Повышенные роли через многоразовую ссылку не выдаются никогда — такую ссылку могут переслать за секунду.</p></div>
+
+  <h3>Права: четыре уровня контроля</h3>
+  <p><b>Роль</b> отвечает на вопрос «кто ты», <b>право</b> — «какое действие разрешено», <b>область</b> — «над какими записями», и наконец каждая отдельная запись проверяется дополнительно: я автор? исполнитель? проверяющий? мой отдел?</p>
+  <div class="tw"><table>
+    <thead><tr><th>Роль</th><th>Календарь руководителя</th><th>Поручения</th></tr></thead>
+    <tbody>
+      <tr><td><b>Руководитель</b></td><td>Всё, включая приватные встречи</td><td>Вся организация</td></tr>
+      <tr><td><b>Ассистент</b></td><td>Всё, кроме помеченных приватными</td><td>Вся организация по делегированию</td></tr>
+      <tr><td><b>Начальник отдела</b></td><td>Занято / свободно, без деталей</td><td>Свой отдел и вложенные</td></tr>
+      <tr><td><b>Сотрудник</b></td><td>Только свободные окна</td><td>Только свои</td></tr>
+      <tr><td><b>Администратор</b></td><td>Содержание не видит</td><td>Содержание не видит</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Индикатор доступности руководителя</h3>
+  <p>Требование, добавленное в ходе работы. Руководитель одним касанием сообщает, что он на месте и принимает: <b>30 минут</b>, <b>час</b>, <b>до конца дня</b> или <b>поздний приём</b>. Сотрудники видят это в разделе «Кто на связи» и обращаются без заявки.</p>
+  <div class="cards">
+    <div class="card"><span class="tag">Решение</span><h4>У состояния всегда есть срок</h4><p>Истёкший индикатор снимается сам. Вечного «доступен» не бывает: иначе через неделю он перестанет отражать реальность и ему перестанут верить.</p></div>
+    <div class="card"><span class="tag">Решение</span><h4>Поздний приём вместо длинного дня</h4><p>Рабочий день 09:00–19:00. Поздние встречи бывают, но расширять рабочие часы на весь вечер нельзя — посыпятся предложения встреч в 21:00. Руководитель сам открывает поздние окна тогда, когда готов.</p></div>
+    <div class="card"><span class="tag">Решение</span><h4>История сохраняется</h4><p>Каждое переключение пишется в отдельный журнал. Из него позже посчитается, сколько руководитель реально был доступен — без ручного учёта.</p></div>
+  </div>
+
+  <h3>Администрирование прямо в Telegram</h3>
+  <p>Заявки на регистрацию, сотрудники и роли, отделы, ссылки-приглашения, журнал действий. Отдельный веб-интерфейс сознательно отложен: авторизация через Telegram надёжнее пароля, а второй контур входа с паролями и двухфакторностью — заметный объём работы ради одного администратора.</p>
+
+  <h3>Журнал аудита</h3>
+  <p>Только добавление записей, изменение и удаление запрещены. Хранит «было / стало», причину и настоящего автора — включая случаи, когда ассистент действует по поручению руководителя. Скрытых действий от чужого имени в системе не бывает.</p>
+</section>
+
+<!-- 3 -->
+<section>
+  <div class="shead"><span class="num">03</span><h2>Как это проверено</h2></div>
+  <p>Написан скрипт, который прогоняет живой сценарий по настоящей базе и убирает за собой тестовые данные. Он проверяет не только успешный путь, но и <b>отказы</b> — то, чего система делать не должна.</p>
+
+  <ul class="checks">
+    <li><span class="m">✓</span><span>сотрудник активируется по ссылке отдела</span></li>
+    <li><span class="m">✓</span><span>отдел подставляется из ссылки</span></li>
+    <li><span class="m">✓</span><span>заявка ждёт администратора</span></li>
+    <li><span class="m">✓</span><span>до подтверждения прав нет вообще</span></li>
+    <li><span class="m">✓</span><span>пересланная ссылка не даёт роль начальника</span></li>
+    <li><span class="m">✓</span><span>личная ссылка выдаёт роль сразу</span></li>
+    <li><span class="m">✓</span><span>заявки видны администратору</span></li>
+    <li><span class="m">✓</span><span>после подтверждения доступ открыт</span></li>
+    <li><span class="m">✓</span><span>сотрудник открывает своё поручение</span></li>
+    <li><span class="m">✓</span><span>сотрудник НЕ открывает чужое</span></li>
+    <li><span class="m">✓</span><span>начальник видит свой отдел</span></li>
+    <li><span class="m">✓</span><span>начальник НЕ видит соседний отдел</span></li>
+    <li><span class="m">✓</span><span>у сотрудника нет прав администратора</span></li>
+    <li><span class="m">✓</span><span>статус «принимаю» включается</span></li>
+    <li><span class="m">✓</span><span>сотрудники видят, кто на связи</span></li>
+    <li><span class="m">✓</span><span>истёкший статус снимается сам</span></li>
+    <li><span class="m">✓</span><span>поздний приём открывает окна</span></li>
+    <li><span class="m">✓</span><span>рабочий день 09:00–19:00</span></li>
+    <li><span class="m">✓</span><span>суббота нерабочая</span></li>
+    <li><span class="m">✓</span><span>регистрация записана в журнал</span></li>
+    <li><span class="m">✓</span><span>подтверждение записано в журнал</span></li>
+    <li><span class="m">✓</span><span>доступность записана в журнал</span></li>
+  </ul>
+
+  <pre><code>Пройдено: 26   Ошибок: 0</code></pre>
+  <p>Проверка запускается одной командой и должна проходить перед каждым следующим блоком. Если она падает — сначала чинится, потом делается новое.</p>
+</section>
+
+<!-- 4 -->
+<section>
+  <div class="shead"><span class="num">04</span><h2>Препятствия, которые пришлось снять</h2></div>
+  <div class="tw"><table>
+    <thead><tr><th>Что мешало</th><th>Как решено</th></tr></thead>
+    <tbody>
+      <tr><td>Docker Desktop не был запущен</td><td>Запущен, дождались готовности демона</td></tr>
+      <tr><td>Порты 5432, 6379 и 8000 заняты другими вашими проектами (<code>mailing</code>, <code>ai_tmk</code>)</td><td>SETA переведена на 55432, 56379 и 8010 — чужие контейнеры не тронуты</td></tr>
+      <tr><td>Сборка образа падала на установке системных пакетов</td><td>Лишний слой удалён — нужные сертификаты уже есть в базовом образе</td></tr>
+      <tr><td>Сгенерированная миграция терялась вместе с контейнером</td><td>Добавлен режим разработки с монтированием исходников: код правится без пересборки</td></tr>
+      <tr><td>Скрипты не видели пакет приложения</td><td>Задан путь поиска модулей в образе</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 5 -->
+<section>
+  <div class="shead"><span class="num">05</span><h2>Репозиторий и память проекта</h2></div>
+  <p>Код залит на <b>github.com/yuldoshbek/Bot</b>, ветка <code>main</code>, 59 файлов. Секреты в репозиторий не попадают: <code>.env</code> исключён и в git, и в сборку образа — это проверено перед публикацией.</p>
+
+  <h3>Папка <code>agent/</code> — чтобы любой агент подхватил проект</h3>
+  <p>Отдельная просьба выполнена так: в корне лежит <code>AGENTS.md</code> — точка входа с порядком чтения и правилами проекта, а рядом папка с полным контекстом.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Файл</th><th>Что содержит</th></tr></thead>
+    <tbody>
+      <tr><td><code>AGENTS.md</code></td><td>Точка входа: порядок чтения, 7 главных правил проекта, что делать в начале и в конце работы</td></tr>
+      <tr><td><code>agent/CONTEXT.md</code></td><td>Кто заказчик, какую задачу решаем, что известно об организации, главный риск</td></tr>
+      <tr><td><code>agent/DECISIONS.md</code></td><td>16 решений с обоснованиями — включая почему отклонены Firebase и бесплатный хостинг</td></tr>
+      <tr><td><code>agent/ARCHITECTURE.md</code></td><td>Слои, все таблицы, устройство прав, что построено и что запланировано</td></tr>
+      <tr><td><code>agent/STATE.md</code></td><td>Что готово сейчас, что не сделано, как запустить, состав следующего блока</td></tr>
+      <tr><td><code>agent/CONVENTIONS.md</code></td><td>Как писать код: стиль, обязательные проверки прав, правила миграций и аудита</td></tr>
+      <tr><td><code>agent/HISTORY.md</code></td><td>Журнал сессий: что менялось, что проверено, что осталось</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note"><p>Смысл в том, что новый агент — или вы через месяц — открывает <code>AGENTS.md</code> и за пять минут получает всё: зачем проект, какие решения приняты и почему, что уже работает и что делать дальше. Пересказывать историю переписки не придётся.</p></div>
+</section>
+
+<!-- 6 -->
+<section>
+  <div class="shead"><span class="num">06</span><h2>Что осталось незакрытым</h2></div>
+  <div class="tw"><table>
+    <thead><tr><th>Пункт</th><th>Статус</th><th>Что нужно</th></tr></thead>
+    <tbody>
+      <tr><td><b>Запуск с настоящим токеном</b></td><td><span class="chip c-prog">Ждёт вас</span></td><td>Вписать <code>BOT_TOKEN</code> и свой Telegram ID в <code>seta/.env</code></td></tr>
+      <tr><td><b>Сервер и домен</b></td><td><span class="chip c-prog">Ждёт вас</span></td><td>Hetzner CX32 ≈ €8/мес. Пока работаем локально, сервер не блокирует разработку</td></tr>
+      <tr><td><b>Поручения и контроль</b></td><td><span class="chip c-new">Блок 2</span></td><td>Следующий шаг, начинаю сразу после запуска бота</td></tr>
+      <tr><td><b>Календарь и встречи</b></td><td><span class="chip c-new">Блок 3</span></td><td>По плану, недели 5–7</td></tr>
+      <tr><td><b>Mini App и дашборды</b></td><td><span class="chip c-new">Блок 5</span></td><td>Требует домена с HTTPS</td></tr>
+      <tr><td><b>ИИ и голос</b></td><td><span class="chip c-new">Блок 6</span></td><td>Ключ OpenAI у вас есть, подключается последним</td></tr>
+      <tr><td><b>Узбекский язык</b></td><td><span class="chip c-new">Блок 5</span></td><td>Двуязычность заложена, переводы заполняются когда тексты перестанут меняться</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 7 -->
+<section>
+  <div class="shead"><span class="num">07</span><h2>Что нужно от вас сейчас</h2></div>
+  <p>Одно действие — две строки в файле <code>seta/.env</code>:</p>
+  <pre><code>BOT_TOKEN=токен_от_BotFather
+BOOTSTRAP_ADMIN_TELEGRAM_ID=ваш_числовой_id</code></pre>
+  <p>Свой Telegram ID даёт бот <code>@userinfobot</code>. Токен вписывайте прямо в файл — не пересылайте его в переписку: всё, что попало в чат, считается скомпрометированным.</p>
+  <p>Затем одна команда — и бот отвечает на <code>/start</code>:</p>
+  <pre><code>docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d</code></pre>
+  <p>Вы войдёте администратором, заведёте отделы и разошлёте ссылки. После этого начинаю блок 2: поручения, сроки, напоминания, эскалация и проверка качества — то, ради чего вся система и затевалась.</p>
+</section>
+
+<footer>
+  <p>SETA · Отчёт по блоку 1 · 31 августа 2026 · Репозиторий github.com/yuldoshbek/Bot · Проверка блока: 26 сценариев, 0 ошибок</p>
+</footer>
+
+</main></div>

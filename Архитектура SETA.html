@@ -1,0 +1,879 @@
+<title>Архитектура SETA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Literata:opsz,wght@7..72,400;7..72,500;7..72,600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+<style>
+/* ─────────────────────────  ТОКЕНЫ  ───────────────────────── */
+:root{
+  --bg:#F3F6F5;
+  --surface:#FFFFFF;
+  --surface-2:#EAF0EF;
+  --ink:#0F1F1E;
+  --ink-2:#3B4E4C;
+  --ink-3:#6C807E;
+  --line:#D4DEDC;
+  --line-2:#B6C5C3;
+  --accent:#0E6B6B;
+  --accent-2:#0A5253;
+  --accent-soft:#DDEDEC;
+  --on-accent:#FFFFFF;
+
+  --s-new:#2A66C8;
+  --s-prog:#9C7413;
+  --s-attn:#BC5F26;
+  --s-done:#26714B;
+  --s-late:#B23731;
+  --s-off:#71827F;
+
+  --radius:6px;
+  --maxw:1240px;
+  --prose:68ch;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0B1110;
+    --surface:#121A19;
+    --surface-2:#182221;
+    --ink:#E6EDEB;
+    --ink-2:#AEC0BD;
+    --ink-3:#7E918E;
+    --line:#25322F;
+    --line-2:#344643;
+    --accent:#43B5AF;
+    --accent-2:#6ACFC8;
+    --accent-soft:#12302E;
+    --on-accent:#06201F;
+
+    --s-new:#77ACF7;
+    --s-prog:#DCB253;
+    --s-attn:#E8945F;
+    --s-done:#5CBA88;
+    --s-late:#E87A72;
+    --s-off:#8FA29F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0B1110;
+  --surface:#121A19;
+  --surface-2:#182221;
+  --ink:#E6EDEB;
+  --ink-2:#AEC0BD;
+  --ink-3:#7E918E;
+  --line:#25322F;
+  --line-2:#344643;
+  --accent:#43B5AF;
+  --accent-2:#6ACFC8;
+  --accent-soft:#12302E;
+  --on-accent:#06201F;
+
+  --s-new:#77ACF7;
+  --s-prog:#DCB253;
+  --s-attn:#E8945F;
+  --s-done:#5CBA88;
+  --s-late:#E87A72;
+  --s-off:#8FA29F;
+}
+
+/* ─────────────────────────  БАЗА  ───────────────────────── */
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"Literata",Georgia,"Times New Roman",serif;
+  font-size:16.5px;
+  line-height:1.68;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4,th,.ui{font-family:"Golos Text","Segoe UI",system-ui,sans-serif}
+code,kbd,.mono{font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;font-size:.87em}
+
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(16px,4vw,40px)}
+.prose > p, .prose > ul, .prose > ol{max-width:var(--prose)}
+
+a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:2px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
+
+/* ─────────────────────────  ШАПКА  ───────────────────────── */
+.masthead{
+  border-bottom:1px solid var(--line);
+  background:var(--surface);
+  padding:clamp(36px,6vw,72px) 0 clamp(28px,4vw,44px);
+}
+.eyebrow{
+  font-family:"Golos Text",system-ui,sans-serif;
+  font-size:11.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--accent);margin:0 0 14px;
+}
+h1{
+  font-size:clamp(34px,6vw,60px);line-height:1.03;font-weight:700;letter-spacing:-.02em;
+  margin:0 0 18px;text-wrap:balance;
+}
+h1 .dim{color:var(--ink-3);font-weight:500}
+.lede{font-size:clamp(17px,2.2vw,20px);color:var(--ink-2);max-width:60ch;margin:0 0 28px}
+.meta{
+  display:flex;flex-wrap:wrap;gap:8px 28px;
+  font-family:"Golos Text",system-ui,sans-serif;font-size:13px;color:var(--ink-3);
+  border-top:1px solid var(--line);padding-top:18px;
+}
+.meta b{color:var(--ink-2);font-weight:600}
+
+/* ─────────────────────────  СЕТКА  ───────────────────────── */
+.shell{display:grid;grid-template-columns:1fr;gap:0}
+@media (min-width:1060px){
+  .shell{grid-template-columns:212px minmax(0,1fr);gap:52px;align-items:start}
+}
+nav.toc{display:none}
+@media (min-width:1060px){
+  nav.toc{
+    display:block;position:sticky;top:0;max-height:100vh;overflow-y:auto;
+    padding:44px 0 40px;font-family:"Golos Text",system-ui,sans-serif;font-size:13.5px;
+  }
+  nav.toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
+  nav.toc a{
+    display:flex;gap:10px;padding:5px 10px 5px 0;color:var(--ink-2);
+    text-decoration:none;border-left:2px solid transparent;padding-left:12px;line-height:1.35;
+  }
+  nav.toc a:hover{color:var(--accent);border-left-color:var(--accent)}
+  nav.toc .n{color:var(--ink-3);font-variant-numeric:tabular-nums;min-width:1.4em}
+  nav.toc .grp{
+    font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);
+    font-weight:600;margin:20px 0 6px 12px;
+  }
+}
+main{padding:44px 0 90px;min-width:0}
+
+/* ─────────────────────────  СЕКЦИИ  ───────────────────────── */
+section{margin:0 0 clamp(48px,7vw,80px);scroll-margin-top:24px}
+.shead{display:flex;align-items:baseline;gap:14px;border-top:2px solid var(--ink);padding-top:14px;margin-bottom:22px}
+.shead .num{
+  font-family:"Golos Text",system-ui,sans-serif;font-size:12px;font-weight:700;
+  color:var(--accent);letter-spacing:.06em;font-variant-numeric:tabular-nums;padding-top:6px;
+}
+h2{font-size:clamp(23px,3.4vw,31px);line-height:1.16;font-weight:700;letter-spacing:-.015em;margin:0;text-wrap:balance}
+h3{font-size:18px;font-weight:600;margin:36px 0 10px;letter-spacing:-.005em}
+h4{font-size:14px;font-weight:600;margin:24px 0 8px;color:var(--ink-2);letter-spacing:.01em}
+p{margin:0 0 15px}
+ul,ol{margin:0 0 15px;padding-left:1.25em}
+li{margin:0 0 6px}
+li::marker{color:var(--ink-3)}
+.note{
+  border-left:3px solid var(--accent);background:var(--accent-soft);
+  padding:14px 18px;margin:20px 0;border-radius:0 var(--radius) var(--radius) 0;
+}
+.note p{margin:0}
+.note p + p{margin-top:10px}
+.warn{border-left-color:var(--s-late);background:color-mix(in srgb,var(--s-late) 9%,var(--surface))}
+
+/* ─────────────────────────  ТАБЛИЦЫ  ───────────────────────── */
+.tw{overflow-x:auto;margin:20px 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-family:"Golos Text",system-ui,sans-serif;font-size:14px;min-width:520px}
+th{
+  text-align:left;font-weight:600;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);padding:11px 14px;border-bottom:1px solid var(--line-2);vertical-align:bottom;white-space:nowrap;
+}
+td{padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink-2);line-height:1.5}
+tbody tr:last-child td{border-bottom:none}
+td b,td strong{color:var(--ink);font-weight:600}
+.num-col{font-variant-numeric:tabular-nums;white-space:nowrap}
+table code{background:var(--surface-2);padding:1px 5px;border-radius:3px;color:var(--ink)}
+
+/* ─────────────────────────  ЧИПЫ СТАТУСОВ  ───────────────────────── */
+.chip{
+  display:inline-flex;align-items:center;gap:6px;font-family:"Golos Text",system-ui,sans-serif;
+  font-size:12px;font-weight:600;padding:2px 9px;border-radius:100px;white-space:nowrap;
+  border:1px solid;
+}
+.chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.c-new{color:var(--s-new);border-color:color-mix(in srgb,var(--s-new) 35%,transparent);background:color-mix(in srgb,var(--s-new) 10%,var(--surface))}
+.c-prog{color:var(--s-prog);border-color:color-mix(in srgb,var(--s-prog) 35%,transparent);background:color-mix(in srgb,var(--s-prog) 10%,var(--surface))}
+.c-attn{color:var(--s-attn);border-color:color-mix(in srgb,var(--s-attn) 35%,transparent);background:color-mix(in srgb,var(--s-attn) 10%,var(--surface))}
+.c-done{color:var(--s-done);border-color:color-mix(in srgb,var(--s-done) 35%,transparent);background:color-mix(in srgb,var(--s-done) 10%,var(--surface))}
+.c-late{color:var(--s-late);border-color:color-mix(in srgb,var(--s-late) 35%,transparent);background:color-mix(in srgb,var(--s-late) 10%,var(--surface))}
+.c-off{color:var(--s-off);border-color:color-mix(in srgb,var(--s-off) 35%,transparent);background:color-mix(in srgb,var(--s-off) 10%,var(--surface))}
+
+/* ─────────────────────────  ЦИКЛ  ───────────────────────── */
+.cycle{
+  display:flex;flex-wrap:wrap;align-items:stretch;gap:7px;margin:24px 0;
+  padding:22px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+}
+.cycle .st{
+  font-family:"Golos Text",system-ui,sans-serif;font-size:12.5px;font-weight:600;
+  padding:8px 13px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius);
+  color:var(--ink);white-space:nowrap;
+}
+.cycle .st.hot{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.cycle .ar{display:flex;align-items:center;color:var(--ink-3);font-size:13px;user-select:none}
+
+/* ─────────────────────────  АРХИТЕКТУРА  ───────────────────────── */
+.arch{
+  display:flex;flex-direction:column;gap:0;margin:24px 0;
+  border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);overflow:hidden;
+}
+.tier{display:grid;grid-template-columns:104px minmax(0,1fr);border-bottom:1px solid var(--line)}
+.tier:last-child{border-bottom:none}
+.tier .lbl{
+  font-family:"Golos Text",system-ui,sans-serif;font-size:10.5px;font-weight:700;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-3);padding:16px 12px;background:var(--surface-2);
+  border-right:1px solid var(--line);display:flex;align-items:center;line-height:1.3;
+}
+.tier .body{padding:14px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.box{
+  font-family:"Golos Text",system-ui,sans-serif;font-size:12.5px;font-weight:500;
+  padding:7px 12px;border:1px solid var(--line-2);border-radius:var(--radius);
+  background:var(--bg);color:var(--ink);
+}
+.box.k{background:var(--accent);color:var(--on-accent);border-color:var(--accent);font-weight:600}
+.box.o{border-style:dashed;color:var(--ink-2)}
+.box small{display:block;font-size:10.5px;color:var(--ink-3);font-weight:400;margin-top:1px}
+.box.k small{color:color-mix(in srgb,var(--on-accent) 72%,transparent)}
+
+/* ─────────────────────────  КАРТОЧКИ  ───────────────────────── */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:20px 0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.card h4{margin:0 0 8px;color:var(--ink);font-size:15px}
+.card p{margin:0;font-size:14.5px;color:var(--ink-2);line-height:1.55}
+.card ul{margin:8px 0 0;padding-left:1.1em;font-size:14px;color:var(--ink-2)}
+.card .tag{
+  display:inline-block;font-family:"Golos Text",system-ui,sans-serif;font-size:10.5px;font-weight:700;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:9px;
+}
+
+/* ─────────────────────────  ПЛАН  ───────────────────────── */
+.plan{display:flex;flex-direction:column;gap:0;margin:22px 0}
+.blk{
+  display:grid;grid-template-columns:64px minmax(0,1fr);gap:20px;
+  padding:22px 0;border-top:1px solid var(--line);
+}
+.blk:last-child{border-bottom:1px solid var(--line)}
+.blk .idx{font-family:"Golos Text",system-ui,sans-serif;padding-top:2px}
+.blk .idx .b{font-size:26px;font-weight:700;color:var(--accent);line-height:1;font-variant-numeric:tabular-nums}
+.blk .idx .w{font-size:11px;color:var(--ink-3);margin-top:5px;letter-spacing:.04em}
+.blk h3{margin:0 0 7px;font-size:17px}
+.blk p{margin:0 0 10px;font-size:15px;color:var(--ink-2)}
+.dod{
+  font-family:"Golos Text",system-ui,sans-serif;font-size:13px;color:var(--ink-2);
+  background:var(--surface-2);border-radius:var(--radius);padding:10px 14px;margin-top:10px;
+}
+.dod b{color:var(--ink);font-weight:600}
+
+/* ─────────────────────────  СПИСОК ФУНКЦИЙ  ───────────────────────── */
+.feats{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:0 26px;margin:18px 0;list-style:none;padding:0}
+.feats li{
+  display:grid;grid-template-columns:26px 1fr;gap:9px;padding:9px 0;
+  border-bottom:1px solid var(--line);font-size:14.5px;margin:0;
+}
+.feats .n{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink-3);padding-top:3px;font-variant-numeric:tabular-nums}
+.feats b{font-weight:600;font-family:"Golos Text",system-ui,sans-serif;font-size:14px;display:block;color:var(--ink)}
+.feats span.d{color:var(--ink-2);font-size:13.5px;line-height:1.45}
+
+/* ─────────────────────────  ЧЕКЛИСТ  ───────────────────────── */
+.check{list-style:none;padding:0;margin:20px 0;display:flex;flex-direction:column;gap:10px}
+.check li{
+  display:grid;grid-template-columns:22px 1fr;gap:12px;align-items:start;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:0;
+}
+.check .bx{width:16px;height:16px;border:1.5px solid var(--line-2);border-radius:3px;margin-top:4px}
+.check b{font-family:"Golos Text",system-ui,sans-serif;font-size:14.5px;display:block;margin-bottom:2px}
+.check span{font-size:14px;color:var(--ink-2)}
+
+footer{border-top:1px solid var(--line);padding:26px 0 60px;color:var(--ink-3);font-size:13.5px;font-family:"Golos Text",system-ui,sans-serif}
+
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Техническая архитектура · Версия 1.0</p>
+    <h1>SETA <span class="dim">— корпоративный ассистент руководителя</span></h1>
+    <p class="lede">Единая система управления встречами, решениями, поручениями и контролем исполнения. Telegram — интерфейс, вся логика — на защищённом сервере.</p>
+    <div class="meta">
+      <span><b>Дата:</b> 31 августа 2026</span>
+      <span><b>Статус:</b> архитектура утверждена, к разработке</span>
+      <span><b>Срок до пилота:</b> 14 недель, 6 блоков</span>
+      <span><b>Стоимость инфраструктуры:</b> ≈ €8/мес + $3–10 ИИ</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+<div class="shell">
+
+<nav class="toc" aria-label="Содержание">
+  <ol>
+    <li class="grp">Основа</li>
+    <li><a href="#s1"><span class="n">1</span>Зафиксированные решения</a></li>
+    <li><a href="#s2"><span class="n">2</span>Управленческий цикл</a></li>
+    <li><a href="#s3"><span class="n">3</span>Архитектура</a></li>
+    <li><a href="#s4"><span class="n">4</span>Стек и почему не Firebase</a></li>
+    <li class="grp">Устройство</li>
+    <li><a href="#s5"><span class="n">5</span>Модель данных</a></li>
+    <li><a href="#s6"><span class="n">6</span>Роли и права</a></li>
+    <li><a href="#s7"><span class="n">7</span>Регистрация</a></li>
+    <li><a href="#s8"><span class="n">8</span>Интерфейсы</a></li>
+    <li class="grp">Логика</li>
+    <li><a href="#s9"><span class="n">9</span>Календарь и встречи</a></li>
+    <li><a href="#s10"><span class="n">10</span>Поручения</a></li>
+    <li><a href="#s11"><span class="n">11</span>Уведомления</a></li>
+    <li><a href="#s12"><span class="n">12</span>ИИ-контур</a></li>
+    <li><a href="#s13"><span class="n">13</span>Файлы и поиск</a></li>
+    <li><a href="#s14"><span class="n">14</span>Аналитика</a></li>
+    <li><a href="#s15"><span class="n">15</span>Функции</a></li>
+    <li class="grp">Запуск</li>
+    <li><a href="#s16"><span class="n">16</span>Безопасность</a></li>
+    <li><a href="#s17"><span class="n">17</span>План работ</a></li>
+    <li><a href="#s18"><span class="n">18</span>Что нужно от вас</a></li>
+    <li><a href="#s19"><span class="n">19</span>Риски</a></li>
+  </ol>
+</nav>
+
+<main class="prose">
+
+<!-- 1 ───────────────────────────────────────────── -->
+<section id="s1">
+  <div class="shead"><span class="num">01</span><h2>Зафиксированные решения</h2></div>
+  <p>Каждая строка — результат отдельного разбора. Ни один пункт не принят по умолчанию.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Область</th><th>Решение</th><th>Обоснование</th></tr></thead>
+    <tbody>
+      <tr><td><b>Разработка</b></td><td>Один разработчик + владелец продукта</td><td>Стек обязан быть однородным: один язык, один сервер, одна команда запуска</td></tr>
+      <tr><td><b>Сервер</b></td><td>Hetzner CX32 · Ubuntu 24.04 · Docker</td><td>4 vCPU / 8 ГБ / 80 ГБ за ≈€8. Архитектура полностью переносима на любого провайдера</td></tr>
+      <tr><td><b>База данных</b></td><td>PostgreSQL 16</td><td>Задача реляционная: пересечение интервалов, права, аудит, полнотекстовый поиск</td></tr>
+      <tr><td><b>Кэш и очереди</b></td><td>Redis 7</td><td>Очередь задач, блокировки планировщика, удержание слотов, лимиты частоты</td></tr>
+      <tr><td><b>Календарь</b></td><td>Система — единственный источник истины</td><td>Внешних календарей в организации нет. Двусторонняя синхронизация не строится</td></tr>
+      <tr><td><b>ИИ</b></td><td>OpenAI API, только аналитика и голос</td><td>Все цифры считает система. ИИ объясняет посчитанное и распознаёт речь</td></tr>
+      <tr><td><b>Регистрация</b></td><td>Самостоятельная + подтверждение роли</td><td>Роль, выбранная пользователем самому себе, — это заявка, а не право</td></tr>
+      <tr><td><b>Администрирование</b></td><td>Внутри Telegram Mini App</td><td>Авторизация через Telegram надёжнее пароля. Отдельный веб — на блоке 5</td></tr>
+      <tr><td><b>Языки</b></td><td>Русский, узбекский (латиница и кириллица)</td><td>Все тексты через ключи перевода с первого дня, переводы — на блоке 5</td></tr>
+      <tr><td><b>Файлы</b></td><td>Хранилище Telegram + копия важных у себя</td><td>Бесплатно и без лимита объёма. Поиск — по извлечённому тексту в Postgres</td></tr>
+      <tr><td><b>Порядок работ</b></td><td>6 блоков последовательно, объём полный</td><td>Каждый блок доводится до работы на живых людях до начала следующего</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note"><p><b>Главный архитектурный принцип.</b> Система считает — ИИ объясняет. Просрочки, свободные окна, статусы, выгрузки и уведомления рассчитываются детерминированным кодом и никогда не зависят от языковой модели. ИИ подключается сверху, к уже посчитанным данным. Отключение ИИ не ломает ни одну функцию системы.</p></div>
+</section>
+
+<!-- 2 ───────────────────────────────────────────── -->
+<section id="s2">
+  <div class="shead"><span class="num">02</span><h2>Управленческий цикл</h2></div>
+  <p>Ценность продукта не в количестве функций, а в том, что этот круг замыкается без ручного труда. Всё остальное в документе — обслуживание этого цикла.</p>
+  <div class="cycle">
+    <span class="st">Запрос</span><span class="ar">→</span>
+    <span class="st">Свободное окно</span><span class="ar">→</span>
+    <span class="st hot">Встреча</span><span class="ar">→</span>
+    <span class="st">Решение</span><span class="ar">→</span>
+    <span class="st hot">Поручение</span><span class="ar">→</span>
+    <span class="st">Исполнитель</span><span class="ar">→</span>
+    <span class="st">Срок</span><span class="ar">→</span>
+    <span class="st hot">Контроль</span><span class="ar">→</span>
+    <span class="st">Проверка</span><span class="ar">→</span>
+    <span class="st">Результат</span><span class="ar">→</span>
+    <span class="st">Сводка руководителю</span>
+  </div>
+  <p>Сегодня этот круг разорван в трёх местах: устное поручение нигде не фиксируется, срок помнит только ассистент, а результат проверяется тогда, когда о нём случайно вспомнили. Система закрывает все три разрыва — остальное вторично.</p>
+</section>
+
+<!-- 3 ───────────────────────────────────────────── -->
+<section id="s3">
+  <div class="shead"><span class="num">03</span><h2>Архитектура системы</h2></div>
+  <p>Модульный монолит с фоновыми обработчиками. Не микросервисы: при одном разработчике и пилоте на 30 человек они дают только накладные расходы. Модули разделены внутри кода так, что любой из них позже выносится отдельно без переписывания.</p>
+
+  <div class="arch">
+    <div class="tier">
+      <div class="lbl">Интерфейс</div>
+      <div class="body">
+        <span class="box k">Telegram Bot<small>уведомления, быстрые действия, голос</small></span>
+        <span class="box k">Mini App<small>календарь, дашборды, админка</small></span>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="lbl">Вход</div>
+      <div class="body">
+        <span class="box">Caddy<small>HTTPS, авто-сертификат</small></span>
+        <span class="box">Проверка подписи Telegram</span>
+        <span class="box">Лимиты частоты</span>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="lbl">Ядро</div>
+      <div class="body">
+        <span class="box k">Core API · FastAPI</span>
+        <span class="box">Авторизация</span><span class="box">Пользователи</span><span class="box">Отделы</span>
+        <span class="box">Календарь</span><span class="box">Встречи</span><span class="box">Поручения</span>
+        <span class="box">Уведомления</span><span class="box">Файлы</span><span class="box">Аналитика</span>
+        <span class="box">Права</span><span class="box">Аудит</span><span class="box">Админка</span>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="lbl">Хранение</div>
+      <div class="body">
+        <span class="box k">PostgreSQL 16<small>источник истины</small></span>
+        <span class="box">Redis<small>очередь, блокировки, кэш</small></span>
+        <span class="box o">Диск сервера<small>копии важных файлов</small></span>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="lbl">Фон</div>
+      <div class="body">
+        <span class="box">Планировщик<small>сроки, напоминания, эскалации</small></span>
+        <span class="box">Рассыльщик<small>очередь уведомлений</small></span>
+        <span class="box">ИИ-обработчик<small>голос, сводки, отчёты</small></span>
+        <span class="box">Индексатор<small>текст документов в поиск</small></span>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="lbl">Наружу</div>
+      <div class="body">
+        <span class="box o">Telegram Bot API</span>
+        <span class="box o">OpenAI API<small>Whisper + GPT</small></span>
+        <span class="box o">Резервные копии</span>
+      </div>
+    </div>
+  </div>
+
+  <h3>Почему длинные операции не выполняются в момент запроса</h3>
+  <p>Telegram ждёт ответа на webhook секунды. Распознавание голоса, рассылка сотне участников и формирование отчёта туда не помещаются. Поэтому любой обработчик делает три вещи: сохраняет событие, ставит его в очередь, отвечает «принято». Дальше работает фоновый процесс — повторяемо, идемпотентно, с записью в журнал.</p>
+  <div class="note"><p><b>Идемпотентность.</b> Каждое событие имеет свой идентификатор. Повторная доставка того же события от Telegram или повторный запуск обработчика не создают второе уведомление и вторую встречу. Это защита от самой частой ошибки таких систем — дублей.</p></div>
+</section>
+
+<!-- 4 ───────────────────────────────────────────── -->
+<section id="s4">
+  <div class="shead"><span class="num">04</span><h2>Технологии и почему не Firebase</h2></div>
+  <div class="tw"><table>
+    <thead><tr><th>Слой</th><th>Технология</th><th>Почему именно она</th></tr></thead>
+    <tbody>
+      <tr><td>Бот</td><td><code>aiogram 3</code></td><td>Асинхронный, зрелый, лучшая поддержка Telegram-сценариев</td></tr>
+      <tr><td>API</td><td><code>FastAPI</code> + <code>Pydantic v2</code></td><td>Валидация запросов и автодокументация из коробки</td></tr>
+      <tr><td>Работа с БД</td><td><code>SQLAlchemy 2</code> + <code>Alembic</code></td><td>Миграции версионируются, ручные правки боевой базы запрещены</td></tr>
+      <tr><td>Очередь</td><td><code>ARQ</code> (на Redis)</td><td>Проще Celery, асинхронна, одному разработчику её достаточно</td></tr>
+      <tr><td>Планировщик</td><td><code>ARQ cron</code> + блокировка в Redis</td><td>Блокировка гарантирует: одно напоминание уходит один раз</td></tr>
+      <tr><td>Mini App</td><td><code>React 18</code> + <code>TypeScript</code> + <code>Vite</code></td><td>Стандарт для Telegram Mini Apps, быстрая сборка</td></tr>
+      <tr><td>Графики</td><td><code>Recharts</code></td><td>Достаточно для дашбордов, не тянет тяжёлых зависимостей</td></tr>
+      <tr><td>Прокси и TLS</td><td><code>Caddy</code></td><td>Сертификат Let's Encrypt выпускается и продлевается сам</td></tr>
+      <tr><td>Запуск</td><td><code>Docker Compose</code></td><td>Переезд на другой сервер — копирование двух файлов и дампа</td></tr>
+      <tr><td>Мониторинг</td><td>Проверки состояния + приватный Telegram-канал</td><td>На пилоте Grafana избыточна. Сервер сам сообщает о сбое туда, где вы уже есть</td></tr>
+      <tr><td>Резервные копии</td><td><code>pg_dump</code> по расписанию + внешнее хранилище</td><td>Ежедневно, с ежемесячной проверкой восстановления</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Firebase рассматривался и отклонён</h3>
+  <div class="cards">
+    <div class="card"><span class="tag">Причина 1</span><h4>Задача реляционная</h4><p>Поиск свободного окна — это пересечение интервалов с учётом рабочих часов, буферов, отпусков и участников. Права — соединение пяти таблиц. В документной базе это превращается в ручную денормализацию и рассинхроны.</p></div>
+    <div class="card"><span class="tag">Причина 2</span><h4>Аудит требует транзакций</h4><p>Журнал изменений «было / стало» должен писаться атомарно вместе с самим изменением. Postgres это гарантирует, Firestore на такой логике — нет.</p></div>
+    <div class="card"><span class="tag">Причина 3</span><h4>Ядро продукта — расписание</h4><p>Дедлайны и эскалации тикают каждую минуту. Это постоянно живущий процесс, а не облачные функции с холодным стартом и оплатой за вызов.</p></div>
+    <div class="card"><span class="tag">Причина 4</span><h4>Поиска по документам нет</h4><p>Firestore не умеет полнотекстовый поиск — потребовался бы ещё один внешний сервис и ещё одна копия данных вовне. Postgres умеет из коробки.</p></div>
+    <div class="card"><span class="tag">Причина 5</span><h4>Привязка к поставщику</h4><p>Уход с Firebase — это переписывание. Уход с Postgres — это перенос дампа. Для корпоративной системы второе принципиально.</p></div>
+    <div class="card"><span class="tag">И главное</span><h4>Авторизация не нужна извне</h4><p>Вход здесь — Telegram ID плюс корпоративное подтверждение. Готовый провайдер входа не решает никакой задачи, ради которой стоило бы брать всю платформу.</p></div>
+  </div>
+</section>
+
+<!-- 5 ───────────────────────────────────────────── -->
+<section id="s5">
+  <div class="shead"><span class="num">05</span><h2>Модель данных</h2></div>
+  <p>Тридцать восемь таблиц. Все временные метки хранятся в UTC, показываются в часовом поясе пользователя (по умолчанию Asia/Tashkent, UTC+5). Идентификатор Telegram хранится как 64-битное целое. Поле <code>organization_id</code> заложено сразу, хотя организация пока одна.</p>
+
+  <h3>Ключевые сущности</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Таблица</th><th>Основные поля</th><th>Назначение</th></tr></thead>
+    <tbody>
+      <tr><td><code>users</code></td><td>id, organization_id, telegram_user_id, phone, ФИО, department_id, position, status, timezone, locale, created_at</td><td>Сотрудник. Связь Telegram ↔ корпоративная личность</td></tr>
+      <tr><td><code>departments</code></td><td>id, name, parent_id, head_user_id</td><td>Дерево подразделений, начальник отдела</td></tr>
+      <tr><td><code>roles</code> · <code>permissions</code> · <code>role_permissions</code> · <code>user_roles</code></td><td>код, название, scope, valid_from, valid_to</td><td>Роли и права, включая временные</td></tr>
+      <tr><td><code>delegations</code></td><td>from_user, to_user, набор прав, период, причина</td><td>Ассистент действует от имени руководителя в рамках срока</td></tr>
+      <tr><td><code>invites</code></td><td>token, department_id, role, срок жизни, использован_кем</td><td>Персональные и отдельские ссылки-приглашения</td></tr>
+      <tr><td><code>meetings</code></td><td>id, owner_id, title, description, start_at, end_at, room_id, status, visibility, priority, created_by</td><td>Встреча. Видимость управляет тем, кто видит детали</td></tr>
+      <tr><td><code>meeting_participants</code></td><td>meeting_id, user_id, role, ответ на приглашение</td><td>Участники и их подтверждения</td></tr>
+      <tr><td><code>meeting_attendance</code></td><td>meeting_id, user_id, отметился_в, опоздание_мин, источник отметки</td><td>Фактическая явка: самоотметка + корректировка ассистента</td></tr>
+      <tr><td><code>meeting_ratings</code></td><td>meeting_id, оценка, голосовой комментарий, расшифровка</td><td>Оценка встречи руководителем в одно касание</td></tr>
+      <tr><td><code>meeting_requests</code></td><td>инициатор, к_кому, тема, длительность, предложенные окна, статус</td><td>Заявка на встречу до её подтверждения</td></tr>
+      <tr><td><code>slot_holds</code></td><td>owner_id, интервал, request_id, истекает_в</td><td>Удержание окна на время рассмотрения заявки</td></tr>
+      <tr><td><code>tasks</code></td><td>id, title, description, автор, исполнитель, проверяющий, due_at, priority, status, requires_review, meeting_id, decision_id, личный_контроль</td><td>Поручение — центральный объект системы</td></tr>
+      <tr><td><code>task_events</code></td><td>task_id, кто, что изменил, было, стало, когда</td><td>Полная история жизни поручения</td></tr>
+      <tr><td><code>task_extensions</code></td><td>task_id, старый срок, новый срок, обоснование, кто одобрил</td><td>Каждое продление зафиксировано и видно в аналитике</td></tr>
+      <tr><td><code>decisions</code></td><td>id, meeting_id, формулировка, автор, дата, связанные поручения</td><td>Реестр принятых решений с поиском</td></tr>
+      <tr><td><code>files</code></td><td>id, telegram_file_id, локальный путь, имя, MIME, размер, владелец, привязка, политика доступа</td><td>Документ. Права проверяются отдельно от прав на встречу</td></tr>
+      <tr><td><code>file_texts</code></td><td>file_id, извлечённый текст, вектор поиска</td><td>Полнотекстовый поиск по содержимому документов</td></tr>
+      <tr><td><code>time_quotas</code></td><td>субъект (отдел или человек), минут в период, период</td><td>Лимит времени руководителя на сотрудника или отдел</td></tr>
+      <tr><td><code>working_hours</code> · <code>calendar_blocks</code> · <code>holidays</code> · <code>absences</code></td><td>рабочие часы, обед, буфер, блокировки, праздники, отпуска</td><td>Всё, что влияет на расчёт свободного времени</td></tr>
+      <tr><td><code>notifications</code></td><td>event_id, получатель, тип, приоритет, шаблон, статус доставки, попытки</td><td>Очередь с защитой от дублей и повторными попытками</td></tr>
+      <tr><td><code>ai_jobs</code></td><td>тип, модель, промпт-версия, стоимость, статус, подтверждено_человеком</td><td>Журнал всех обращений к ИИ и фактов подтверждения</td></tr>
+      <tr><td><code>audit_log</code></td><td>кто, действие, объект, было, стало, когда, источник</td><td>Только добавление. Изменение и удаление записей запрещены</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>Остальные таблицы</h4>
+  <p><code>organizations</code>, <code>rooms</code>, <code>room_bookings</code>, <code>task_comments</code>, <code>task_dependencies</code>, <code>task_templates</code>, <code>recurring_tasks</code>, <code>recurring_meetings</code>, <code>approvals</code>, <code>polls</code>, <code>poll_votes</code>, <code>notification_templates</code>, <code>notification_prefs</code>, <code>feature_flags</code>, <code>ui_config</code>, <code>ai_budget</code>, <code>search_index</code>, <code>feedback</code>.</p>
+
+  <h4>Индексы, без которых система встанет</h4>
+  <p><code>tasks(assignee_id, status, due_at)</code> · <code>tasks(reviewer_id, status)</code> · <code>meetings(owner_id, start_at)</code> · <code>meeting_participants(user_id, meeting_id)</code> · <code>notifications(user_id, status, created_at)</code> · <code>audit_log(entity_type, entity_id, created_at)</code> · GIN-индекс по вектору поиска в <code>file_texts</code>.</p>
+</section>
+
+<!-- 6 ───────────────────────────────────────────── -->
+<section id="s6">
+  <div class="shead"><span class="num">06</span><h2>Роли, права и область видимости</h2></div>
+  <p>Три уровня контроля работают одновременно. <b>Роль</b> отвечает на вопрос «кто ты». <b>Право</b> — «какое действие тебе разрешено». <b>Область</b> — «над какими записями». Наличие права <code>task.read</code> само по себе не открывает ни одного поручения: система дополнительно спрашивает, являетесь ли вы автором, исполнителем, проверяющим или начальником исполнителя.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Роль</th><th>Календарь руководителя</th><th>Поручения</th><th>Область видимости</th></tr></thead>
+    <tbody>
+      <tr><td><b>Руководитель</b></td><td>Полный, включая приватные встречи</td><td>Создаёт, контролирует, ставит на личный контроль</td><td>Вся организация</td></tr>
+      <tr><td><b>Ассистент</b></td><td>Полный, кроме встреч с пометкой «приватная»</td><td>Создаёт от имени руководителя, проверяет, эскалирует</td><td>Вся организация в рамках делегирования</td></tr>
+      <tr><td><b>Начальник отдела</b></td><td>Занято / свободно, без деталей</td><td>Поручения своего отдела и подчинённых</td><td>Свой отдел и вложенные</td></tr>
+      <tr><td><b>Сотрудник</b></td><td>Только свободные окна</td><td>Свои: где он автор, исполнитель или участник</td><td>Только собственные записи</td></tr>
+      <tr><td><b>Администратор</b></td><td>Не видит содержание встреч</td><td>Не видит содержание поручений</td><td>Пользователи, роли, настройки, состояние системы</td></tr>
+      <tr><td><b>Аудитор</b></td><td>Только чтение журнала</td><td>Только чтение журнала</td><td>Журнал аудита, без изменения данных</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note"><p><b>Администратор — не всевидящий.</b> Роль управляет учётными записями и настройками, но не открывает содержание встреч и поручений руководства. Это единственный способ сделать так, чтобы систему можно было передать в поддержку, не отдавая вместе с ней календарь замдиректора.</p></div>
+
+  <h3>Делегирование</h3>
+  <p>Руководитель выдаёт ассистенту набор прав на период: создавать встречи, переносить их, создавать поручения, отвечать на заявки. По окончании срока права прекращаются автоматически. Любое действие в рамках делегирования подписывается «по поручению руководителя» и попадает в журнал с указанием настоящего автора.</p>
+  <div class="note warn"><p><b>Скрытых действий от чужого имени в системе нет.</b> Сообщение, отправленное ассистентом от имени руководителя, всегда несёт эту подпись. Это защищает в первую очередь самого ассистента: при любом разбирательстве есть точная запись, кто, что и на каком основании отправил.</p></div>
+</section>
+
+<!-- 7 ───────────────────────────────────────────── -->
+<section id="s7">
+  <div class="shead"><span class="num">07</span><h2>Регистрация и вход</h2></div>
+  <p>Идентификатор Telegram сам по себе не является корпоративной личностью. Связь строится так: <span class="mono">Telegram ID → сотрудник → отдел → роль → права → область данных</span>.</p>
+
+  <div class="cards">
+    <div class="card"><span class="tag">Путь 1 · основной</span><h4>Ссылка отдела</h4><p>Администратор создаёт ссылку «HR, роль Сотрудник» и отправляет её в чат отдела. Каждый, кто перешёл, получает правильную роль автоматически. Подтверждать вручную ничего не нужно.</p></div>
+    <div class="card"><span class="tag">Путь 2</span><h4>Свободная регистрация</h4><p>Сотрудник открывает бота, вводит ФИО, выбирает отдел и желаемую роль. Администратору приходит одна карточка с кнопками «Принять · Изменить роль · Отклонить». Роль «Сотрудник» может приниматься автоматически.</p></div>
+    <div class="card"><span class="tag">Путь 3</span><h4>Персональное приглашение</h4><p>Одноразовая ссылка, привязанная к конкретному человеку, срок жизни 72 часа. Используется для руководителей, начальников отделов и ассистентов.</p></div>
+  </div>
+
+  <p>Во всех случаях завершающий шаг один — подтверждение номера телефона штатной кнопкой Telegram. Общая ссылка на бота без приглашения ведёт на экран «Обратитесь к администратору за доступом».</p>
+  <div class="note warn"><p><b>Правило без исключений.</b> Роли выше «Сотрудника» выдаёт только человек. Роль «Руководитель» назначается исключительно администратором вручную. Самостоятельно выбранная роль до подтверждения — это заявка, и никаких прав она не даёт.</p></div>
+</section>
+
+<!-- 8 ───────────────────────────────────────────── -->
+<section id="s8">
+  <div class="shead"><span class="num">08</span><h2>Четыре интерфейса, один бот</h2></div>
+  <p>Backend, база, правила и аудит общие. Отличается только то, что человек видит после входа.</p>
+
+  <div class="cards">
+    <div class="card"><span class="tag">Руководитель</span><h4>Меньше нажатий — больше контроля</h4>
+      <ul><li>Сейчас / следующая встреча</li><li>Требует решения — с кнопками прямо в чате</li><li>На контроле, просрочено, на проверке</li><li>Мой день и свободные окна</li><li>Поручение голосом</li><li>Утренняя сводка в 07:30</li><li>Оценка встречи одним касанием</li></ul></div>
+    <div class="card"><span class="tag">Ассистент</span><h4>Работа с исключениями, а не со списком</h4>
+      <ul><li>Все заявки и переносы</li><li>Календарь руководителя целиком</li><li>Создание встреч и поручений от его имени</li><li>Отметка явки, корректировка</li><li>Проверка выполненных поручений</li><li>Что требует внимания сегодня</li></ul></div>
+    <div class="card"><span class="tag">Сотрудник</span><h4>Не изучать систему — просто сделать</h4>
+      <ul><li>Мои встречи</li><li>Мои поручения</li><li>Запросить встречу</li><li>Остаток лимита времени</li><li>Отчёт о выполнении с файлом</li><li>Запрос продления срока</li></ul></div>
+    <div class="card"><span class="tag">Администратор</span><h4>Управление без программирования</h4>
+      <ul><li>Заявки на регистрацию</li><li>Пользователи, отделы, роли</li><li>Рабочие часы, праздники, отпуска</li><li>Шаблоны уведомлений</li><li>Переключатели функций</li><li>Журнал аудита и состояние системы</li></ul></div>
+  </div>
+
+  <h3>Что делает бот, а что — Mini App</h3>
+  <p><b>Бот</b> берёт на себя всё, что должно занимать одно касание: уведомления, кнопки «Принять / Отклонить», голосовые поручения, короткие сценарии, отметку явки. <b>Mini App</b> — всё, что требует экрана: сетка календаря, дашборды с графиками, таблица поручений с фильтрами, карточки встреч, админка.</p>
+  <p>Правило разделения простое: если действие укладывается в две кнопки — оно живёт в чате и никогда не заставляет открывать приложение.</p>
+</section>
+
+<!-- 9 ───────────────────────────────────────────── -->
+<section id="s9">
+  <div class="shead"><span class="num">09</span><h2>Календарь, встречи, свободное время</h2></div>
+
+  <h3>Как считается свободное окно</h3>
+  <p>Расчёт учитывает восемь факторов: существующие встречи, рабочие часы, обед, буфер между встречами, выходные и праздники, отпуска и командировки, персональные блокировки и часовой пояс. Система предлагает 3–5 лучших вариантов, а не весь список дыр в расписании.</p>
+  <p>Значения по умолчанию, настраиваются в админке: рабочий день <b>09:00–18:00</b>, обед <b>13:00–14:00</b>, буфер <b>15 минут</b>, максимум встреч подряд <b>3</b>, предпочтительная длительность <b>30 минут</b>.</p>
+
+  <h3>Удержание слота</h3>
+  <p>Сотрудник выбрал окно — оно немедленно резервируется и другим показывается как занятое. Резерв живёт до конца рабочего дня или до решения руководителя. Отклонили или срок истёк — окно освобождается автоматически, инициатору приходит уведомление. Без этого двойные бронирования начинаются на первой же неделе.</p>
+
+  <h3>Видимость</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Кто смотрит</th><th>Что видит</th></tr></thead>
+    <tbody>
+      <tr><td>Сотрудник</td><td>Только свободные окна и свой остаток лимита времени</td></tr>
+      <tr><td>Начальник отдела</td><td>Свободно / занято, без темы и участников</td></tr>
+      <tr><td>Ассистент</td><td>Всё, кроме встреч с пометкой «приватная» — они видны как занятое время</td></tr>
+      <tr><td>Руководитель</td><td>Всё</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Лимит времени руководителя</h3>
+  <p>Каждому отделу задаётся квота в минутах на неделю или месяц, с индивидуальными исключениями. Сотрудник при запросе видит: <span class="mono">Ваш лимит: 60 мин/неделю · использовано 30 · доступно 30</span>. Превышение <b>не блокирует</b> запрос — срочный вопрос не должен упираться в правило, — но помечает заявку как «сверх лимита» и показывает руководителю отдельно. Отказ становится безличным: отказывает не человек, а норма.</p>
+
+  <h3>Кто может переносить</h3>
+  <p>Переносят руководитель и ассистент в рамках делегирования. Инициатор встречи может только <b>запросить</b> перенос — это создаёт новую заявку. Любой перенос уведомляет всех участников с указанием причины: молчаливых переносов в системе не существует.</p>
+
+  <h3>Явка и оценка</h3>
+  <p>За 5 минут до начала участникам приходит кнопка «Я на месте». Ассистент видит список и может скорректировать вручную. Из этих отметок автоматически считаются пунктуальность, отсутствия и реальная явка по людям и отделам.</p>
+  <p>После встречи руководитель получает одно сообщение: 👍 / 😐 / 👎 и необязательный голосовой комментарий на 10 секунд, который расшифровывается и подшивается к карточке встречи.</p>
+  <div class="note warn"><p><b>Оценки конкретных встреч видят только руководитель и ассистент.</b> Если участники узнают, что их совещания оцениваются, они начнут работать на оценку, а не на результат. Аналитика по оценкам показывается только в обезличенном виде.</p></div>
+
+  <h3>Быстрое совещание</h3>
+  <p>Три поля — тема, участники, длительность — и рассылка «Экстренное совещание через 10 минут» с кнопкой подтверждения. Повестка и документы добавляются позже. Встреча попадает в календарь сразу.</p>
+</section>
+
+<!-- 10 ───────────────────────────────────────────── -->
+<section id="s10">
+  <div class="shead"><span class="num">10</span><h2>Поручения и контроль</h2></div>
+
+  <h3>Жизненный цикл</h3>
+  <p style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+    <span class="chip c-new">Новое</span><span style="color:var(--ink-3)">→</span>
+    <span class="chip c-new">Принято</span><span style="color:var(--ink-3)">→</span>
+    <span class="chip c-prog">В работе</span><span style="color:var(--ink-3)">→</span>
+    <span class="chip c-attn">На проверке</span><span style="color:var(--ink-3)">→</span>
+    <span class="chip c-done">Выполнено</span>
+  </p>
+  <p style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">Дополнительные состояния:
+    <span class="chip c-attn">Заблокировано</span>
+    <span class="chip c-late">Просрочено</span>
+    <span class="chip c-off">Отменено</span>
+  </p>
+
+  <h3>Проверка качества</h3>
+  <p>Слова исполнителя «выполнено» недостаточно. Галочка «требует проверки» включается автоматически для приоритетов <b>Высокий</b> и <b>Критичный</b>, для обычных остаётся выключенной. Проверяющий по умолчанию — автор поручения. Если автор — руководитель, проверка автоматически делегируется ассистенту, а руководитель видит только итог.</p>
+  <p>Проверяющий нажимает «Принять» или «Вернуть на доработку» с комментарием. Возвраты копятся в аналитике и показывают реальное качество работы исполнителя — не количество закрытых задач, а долю принятых с первого раза.</p>
+  <div class="note"><p>Обязательная проверка для всех задач была отклонена сознательно: руководитель утонет в кнопках «Принять» и начнёт жать их не читая. Формальная проверка хуже её отсутствия, потому что создаёт иллюзию контроля.</p></div>
+
+  <h3>Эскалация: фильтрует, а не транслирует</h3>
+  <div class="tw"><table>
+    <thead><tr><th class="num-col">Момент</th><th>Кто получает</th><th>Что происходит</th></tr></thead>
+    <tbody>
+      <tr><td class="num-col">За 48 часов</td><td>Исполнитель</td><td>Напоминание о приближении срока</td></tr>
+      <tr><td class="num-col">За 24 часа</td><td>Исполнитель</td><td>Повторное напоминание</td></tr>
+      <tr><td class="num-col">День срока</td><td>Исполнитель</td><td>«Срок сегодня» с кнопками «Готово / Продлить»</td></tr>
+      <tr><td class="num-col">+1 день</td><td>Исполнитель, начальник отдела</td><td>Статус переходит в <span class="chip c-late">Просрочено</span></td></tr>
+      <tr><td class="num-col">+3 дня или Критичный</td><td>Дополнительно ассистент</td><td>Задача попадает в раздел «Требует внимания»</td></tr>
+      <tr><td class="num-col">Руководителю</td><td>Только в утренней сводке</td><td>Одним блоком: «просрочено 3, из них критичных 1»</td></tr>
+    </tbody>
+  </table></div>
+  <p>Единственное исключение — поручение, которое руководитель создал лично и пометил флагом «на личном контроле»: о его просрочке он узнаёт сразу.</p>
+  <div class="note warn"><p><b>Почему так.</b> Если каждая просрочка долетает до замдиректора поштучно, он через неделю отключит уведомления — и система контроля перестанет работать целиком. Эскалация обязана отсекать шум, а не пересылать его наверх.</p></div>
+
+  <h3>Продление срока</h3>
+  <p>Исполнитель не может передвинуть срок сам. Он отправляет запрос с обоснованием, автор одобряет или отклоняет. Каждое продление сохраняется вместе с причиной. Через месяц работы видно, кто хронически двигает сроки — и это уже не ощущение, а цифра.</p>
+</section>
+
+<!-- 11 ───────────────────────────────────────────── -->
+<section id="s11">
+  <div class="shead"><span class="num">11</span><h2>Уведомления</h2></div>
+  <p>Самый быстрый способ убить такую систему — завалить людей сообщениями. Защита строится на четырёх правилах.</p>
+  <div class="cards">
+    <div class="card"><span class="tag">1</span><h4>Группировка</h4><p>Пять событий по одному поручению превращаются в одно сообщение «Обновления по вашим поручениям: 5 изменений».</p></div>
+    <div class="card"><span class="tag">2</span><h4>Без дублей</h4><p>Каждое событие имеет идентификатор. Повторная обработка не создаёт второе сообщение.</p></div>
+    <div class="card"><span class="tag">3</span><h4>Тихие часы</h4><p>С 21:00 до 07:30 уходят только критичные уведомления. Остальные ждут утра и приходят в сводке.</p></div>
+    <div class="card"><span class="tag">4</span><h4>Приоритеты</h4><p>Критичное показывается отдельным сообщением. Обычное копится в дайджест. Информационное — только в Mini App.</p></div>
+  </div>
+  <p>Все тексты живут в шаблонах с ключами (<code>task.overdue</code>, <code>meeting.cancelled</code>, <code>review.required</code>) и переводами. Ни одной строки текста внутри бизнес-логики. При ошибке доставки — три повторные попытки, затем событие уходит в очередь разбора и администратор видит его в админке.</p>
+</section>
+
+<!-- 12 ───────────────────────────────────────────── -->
+<section id="s12">
+  <div class="shead"><span class="num">12</span><h2>ИИ-контур</h2></div>
+  <p>Отдельный слой поверх системы, а не внутри неё. Ключ OpenAI: данные, отправленные через API, не используются для обучения моделей — в отличие от бесплатных тарифов других поставщиков.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Сценарий</th><th>Что делает ИИ</th><th>Что делает система</th></tr></thead>
+    <tbody>
+      <tr><td><b>Утренняя сводка</b> 07:30</td><td>Превращает готовые цифры в 5–7 строк с расстановкой акцентов</td><td>Считает все цифры: встречи, окна, решения, просрочки</td></tr>
+      <tr><td><b>Голосовое поручение</b></td><td>Распознаёт речь, выделяет исполнителя, задачу, срок, приоритет</td><td>Проверяет права, создаёт черновик, ждёт подтверждения</td></tr>
+      <tr><td><b>Вопрос своими словами</b></td><td>Превращает «что просрочено в финансах за месяц» в структурированный фильтр</td><td>Применяет права, выполняет запрос, возвращает данные</td></tr>
+      <tr><td><b>Недельный отчёт</b></td><td>Формулирует выводы и тренды по посчитанным метрикам</td><td>Считает все 15 показателей аналитики</td></tr>
+      <tr><td><b>Протокол встречи</b></td><td>Черновик: темы, решения, поручения, ответственные, сроки</td><td>Сохраняет черновик, требует подтверждения ассистентом</td></tr>
+      <tr><td><b>Качество встреч</b></td><td>Интерпретирует показатели, формулирует наблюдение</td><td>Считает: встречи без поручений, повторы тем, переносы, явку</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Четыре ограничителя</h3>
+  <div class="cards">
+    <div class="card"><span class="tag">Граница</span><h4>ИИ не пишет в базу</h4><p>Ни одна модель не изменяет данные напрямую. Она формирует предложение, человек нажимает «Подтвердить». Черновик без подтверждения не существует как поручение.</p></div>
+    <div class="card"><span class="tag">Граница</span><h4>Не сырой запрос к базе</h4><p>Поиск своими словами превращается в структурированный фильтр, а не в текст запроса к БД. Права применяются системой после ИИ, а не вместо него — обойти их через формулировку нельзя.</p></div>
+    <div class="card"><span class="tag">Граница</span><h4>Бюджет с жёстким потолком</h4><p>Дневной и месячный лимит расходов. При превышении ИИ отключается, администратор получает уведомление, а система продолжает работать полностью: все цифры, сроки и уведомления от неё не зависят.</p></div>
+    <div class="card"><span class="tag">Граница</span><h4>Слой подмены поставщика</h4><p>Бизнес-логика обращается к внутреннему интерфейсу, а не к OpenAI напрямую. Смена модели или переход на локальную — замена одного адаптера.</p></div>
+  </div>
+
+  <p>Ориентир расхода при 10–30 пользователях: <b>$3–10 в месяц</b>. Модель уровня <code>gpt-4o-mini</code> для рутины, старшая — только для недельного отчёта, <code>whisper</code> для голоса (около $0.006 за минуту: сто голосовых поручений по 30 секунд обходятся в 30 центов). Каждое обращение записывается в журнал: тип, модель, версия промпта, стоимость, кто инициировал, подтвердил ли человек результат.</p>
+</section>
+
+<!-- 13 ───────────────────────────────────────────── -->
+<section id="s13">
+  <div class="shead"><span class="num">13</span><h2>Файлы и поиск</h2></div>
+  <p>Схема хранения выбрана так, чтобы файловое хранилище не стоило ничего и не требовало обслуживания.</p>
+  <ol>
+    <li>Сотрудник отправляет документ боту — Telegram хранит файл у себя бесплатно и без ограничения по объёму, возвращая идентификатор.</li>
+    <li>Система сохраняет идентификатор, метаданные, привязку и политику доступа.</li>
+    <li>Фоновый индексатор извлекает текст из PDF, DOCX и XLSX и кладёт его в поисковый индекс Postgres.</li>
+    <li>Документы, помеченные как важные — протоколы, решения, приказы — дополнительно копируются на диск сервера.</li>
+  </ol>
+  <p>Ограничения честно: бот скачивает файлы до 20 МБ, идентификаторы привязаны к конкретному боту, и для действительно закрытых документов остаётся локальная копия. Проверки при загрузке: расширение, MIME-тип, размер, антивирус.</p>
+  <div class="note"><p><b>Доступ к встрече не даёт доступа к её документам.</b> Права на файл проверяются отдельно. Ссылки на скачивание одноразовые и с ограниченным сроком жизни, каждое открытие пишется в журнал.</p></div>
+  <h3>Глобальный поиск</h3>
+  <p>Один запрос ищет по встречам, поручениям, решениям, людям и содержимому документов. Результаты всегда фильтруются по правам того, кто ищет: сотрудник физически не может увидеть в выдаче чужое поручение, даже если знает его точную формулировку.</p>
+</section>
+
+<!-- 14 ───────────────────────────────────────────── -->
+<section id="s14">
+  <div class="shead"><span class="num">14</span><h2>Аналитика: 15 показателей</h2></div>
+  <p>Все считаются системой из собственных данных. ИИ добавляется сверху только чтобы сформулировать вывод.</p>
+  <div class="tw"><table>
+    <thead><tr><th class="num-col">№</th><th>Показатель</th><th>Как считается</th></tr></thead>
+    <tbody>
+      <tr><td class="num-col">1</td><td><b>Загрузка календаря</b></td><td>Минуты встреч ÷ доступные рабочие минуты, тренд по неделям</td></tr>
+      <tr><td class="num-col">2</td><td><b>Кто расходует время руководителя</b></td><td>Сумма минут по инициаторам и отделам, рейтинг</td></tr>
+      <tr><td class="num-col">3</td><td><b>Стоимость совещания</b></td><td>Участники × длительность в человеко-часах, топ самых дорогих</td></tr>
+      <tr><td class="num-col">4</td><td><b>Пунктуальность</b></td><td>Отметки явки: доля опозданий по людям и отделам</td></tr>
+      <tr><td class="num-col">5</td><td><b>Дисциплина сроков</b></td><td>Доля выполненных вовремя, рейтинг исполнителей и отделов</td></tr>
+      <tr><td class="num-col">6</td><td><b>Хронические переносы</b></td><td>Количество одобренных продлений на исполнителя</td></tr>
+      <tr><td class="num-col">7</td><td><b>Скорость реакции</b></td><td>Время от выдачи поручения до его принятия исполнителем</td></tr>
+      <tr><td class="num-col">8</td><td><b>Возвраты на доработку</b></td><td>Доля задач, отклонённых на проверке — реальное качество работы</td></tr>
+      <tr><td class="num-col">9</td><td><b>Встречи без результата</b></td><td>Доля совещаний, не породивших ни одного поручения или решения</td></tr>
+      <tr><td class="num-col">10</td><td><b>Скорость решений руководителя</b></td><td>Время ожидания заявки от отправки до ответа</td></tr>
+      <tr><td class="num-col">11</td><td><b>Повторяющиеся темы</b></td><td>Одна тема на четырёх и более встречах — проблема не решается</td></tr>
+      <tr><td class="num-col">12</td><td><b>Доступность руководителя</b></td><td>Среднее число дней ожидания свободного окна</td></tr>
+      <tr><td class="num-col">13</td><td><b>Пробки в расписании</b></td><td>Часы и дни с перегрузкой, интервалы без буферов</td></tr>
+      <tr><td class="num-col">14</td><td><b>Тренд просрочек по отделам</b></td><td>Месяц к месяцу: кто улучшается, кто деградирует</td></tr>
+      <tr><td class="num-col">15</td><td><b>Прогноз перегрузки</b></td><td>Встречи и дедлайны следующей недели, предупреждение заранее</td></tr>
+    </tbody>
+  </table></div>
+  <p>На главный экран руководителя выносятся 1, 5, 9, 14 и 15 — остальные доступны в разделе аналитики и в недельном отчёте.</p>
+</section>
+
+<!-- 15 ───────────────────────────────────────────── -->
+<section id="s15">
+  <div class="shead"><span class="num">15</span><h2>Функции: 20 сверх базового цикла</h2></div>
+  <h4>Первая волна — входят в блоки 1–5</h4>
+  <ul class="feats">
+    <li><span class="n">02</span><span><b>Отметка явки</b><span class="d">Кто пришёл, кто опоздал, кто не явился</span></span></li>
+    <li><span class="n">03</span><span><b>Лимит времени</b><span class="d">Квота минут руководителя на сотрудника и отдел</span></span></li>
+    <li><span class="n">06</span><span><b>Досье к встрече</b><span class="d">За 30 минут: тема, участники, документы, прошлые решения</span></span></li>
+    <li><span class="n">07</span><span><b>Отпуска и командировки</b><span class="d">Влияют на календарь и на назначение сроков</span></span></li>
+    <li><span class="n">09</span><span><b>Шаблоны поручений</b><span class="d">Типовые задачи в одно нажатие</span></span></li>
+    <li><span class="n">12</span><span><b>Обсуждение в задаче</b><span class="d">Комментарии и файлы внутри поручения, а не в личных чатах</span></span></li>
+    <li><span class="n">13</span><span><b>Запрос продления</b><span class="d">С обоснованием, одобрением и полной историей</span></span></li>
+    <li><span class="n">17</span><span><b>Реестр решений</b><span class="d">Все решения в одной базе: кто, когда, по какому вопросу</span></span></li>
+    <li><span class="n">18</span><span><b>Глобальный поиск</b><span class="d">По всему, с фильтрацией по правам</span></span></li>
+    <li><span class="n">19</span><span><b>Экспорт в Excel и PDF</b><span class="d">Для бумажной отчётности и докладов наверх</span></span></li>
+    <li><span class="n">20</span><span><b>Личный контроль</b><span class="d">Задача в отдельном списке с особыми правилами эскалации</span></span></li>
+  </ul>
+  <h4>Вторая волна — блок 6 и далее</h4>
+  <ul class="feats">
+    <li><span class="n">01</span><span><b>Переговорные</b><span class="d">Бронирование кабинета с проверкой занятости</span></span></li>
+    <li><span class="n">04</span><span><b>Повторяющиеся встречи</b><span class="d">Планёрка по понедельникам создаётся сама</span></span></li>
+    <li><span class="n">05</span><span><b>Тихие часы</b><span class="d">Режим «не беспокоить» с блоком в календаре</span></span></li>
+    <li><span class="n">08</span><span><b>Передача дел</b><span class="d">На время отсутствия задачи уходят заместителю</span></span></li>
+    <li><span class="n">10</span><span><b>Периодические поручения</b><span class="d">«Отчёт каждую пятницу» создаётся автоматически</span></span></li>
+    <li><span class="n">11</span><span><b>Подзадачи и зависимости</b><span class="d">Задача B не стартует, пока не закрыта A</span></span></li>
+    <li><span class="n">14</span><span><b>Согласование документов</b><span class="d">Цепочка визирования с кнопками</span></span></li>
+    <li><span class="n">15</span><span><b>Утверждение протокола</b><span class="d">Участники подтверждают: «ознакомлен и согласен»</span></span></li>
+    <li><span class="n">16</span><span><b>Опрос вместо встречи</b><span class="d">«Переносим на четверг?» — решение за две минуты</span></span></li>
+  </ul>
+</section>
+
+<!-- 16 ───────────────────────────────────────────── -->
+<section id="s16">
+  <div class="shead"><span class="num">16</span><h2>Безопасность</h2></div>
+  <div class="tw"><table>
+    <thead><tr><th>Контур</th><th>Меры</th></tr></thead>
+    <tbody>
+      <tr><td><b>Вход</b></td><td>HTTPS, секретный токен вебхука, серверная проверка подписи данных Mini App. Данные с клиента никогда не являются основанием для доверия</td></tr>
+      <tr><td><b>Права</b></td><td>Роль + право + область + проверка на уровне каждой записи. Отдельные тесты на подстановку чужого идентификатора и повышение прав</td></tr>
+      <tr><td><b>Секреты</b></td><td>Токен бота, ключ ИИ, пароль базы — только в переменных окружения на сервере. В репозиторий не попадают ни при каких условиях</td></tr>
+      <tr><td><b>Файлы</b></td><td>Проверка расширения и MIME, лимит размера, антивирус, одноразовые ссылки с истечением, журнал открытий</td></tr>
+      <tr><td><b>Аудит</b></td><td>Журнал только на добавление. Фиксируются: изменение сроков, прав, ролей, переносы, удаления, действия по делегированию</td></tr>
+      <tr><td><b>Резервные копии</b></td><td>Ежедневный дамп, хранение вне сервера, ежемесячная проверка восстановления. Копия, которую не восстанавливали, копией не считается</td></tr>
+      <tr><td><b>Данные</b></td><td>Шифрование дисков, минимизация собираемого, архивирование через год, разделение персональных и рабочих данных</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- 17 ───────────────────────────────────────────── -->
+<section id="s17">
+  <div class="shead"><span class="num">17</span><h2>План работ: 6 блоков, 14 недель</h2></div>
+  <p>Порядок не случаен. Поручения идут раньше календаря: они ни от чего не зависят, дают пользу с первой недели и формируют привычку. Календарь — самая сложная часть системы, и строить её лучше на обкатанном ядре.</p>
+
+  <div class="plan">
+    <div class="blk">
+      <div class="idx"><div class="b">1</div><div class="w">Нед. 1–2</div></div>
+      <div>
+        <h3>Ядро</h3>
+        <p>Сервер, база, миграции, бот на вебхуке. Регистрация по ссылке отдела, подтверждение телефона, заявки на роль. Пользователи, отделы, роли, права, области видимости. Журнал аудита. Каркас админки в Mini App.</p>
+        <div class="dod"><b>Готово, когда:</b> пять человек зарегистрировались сами, получили разные роли, и каждый видит ровно то, что положено его роли — проверено попыткой обращения к чужим данным.</div>
+      </div>
+    </div>
+    <div class="blk">
+      <div class="idx"><div class="b">2</div><div class="w">Нед. 3–4</div></div>
+      <div>
+        <h3>Поручения и контроль</h3>
+        <p>Создание, приоритеты, сроки, статусы, принятие исполнителем. Проверка качества с возвратом на доработку. Напоминания, эскалация по порогам, продление срока с обоснованием. Комментарии и файл-отчёт. Шаблоны. Личный контроль.</p>
+        <div class="dod"><b>Готово, когда:</b> поручение прошло полный путь на живых людях — выдано, принято, выполнено, возвращено на доработку, переделано, принято; просрочка эскалировала по всей цепочке без ручного вмешательства.</div>
+      </div>
+    </div>
+    <div class="blk">
+      <div class="idx"><div class="b">3</div><div class="w">Нед. 5–7</div></div>
+      <div>
+        <h3>Календарь и встречи</h3>
+        <p>Рабочие часы, обед, буферы, праздники, отпуска. Расчёт свободных окон. Заявка на встречу, удержание слота, подтверждение и отклонение. Перенос с уведомлением. Быстрое совещание. Лимиты времени. Отметка явки. Оценка встречи.</p>
+        <div class="dod"><b>Готово, когда:</b> сотрудник запросил встречу, получил окна, руководитель подтвердил одной кнопкой, все получили уведомления, двойное бронирование одного окна оказалось невозможным.</div>
+      </div>
+    </div>
+    <div class="blk">
+      <div class="idx"><div class="b">4</div><div class="w">Нед. 8–9</div></div>
+      <div>
+        <h3>Встреча → решение → документ</h3>
+        <p>Карточка встречи, повестка, завершение встречи. Реестр решений. Поручения прямо из встречи. Загрузка документов, извлечение текста, глобальный поиск с правами. Досье за 30 минут до встречи. Экспорт в Excel и PDF.</p>
+        <div class="dod"><b>Готово, когда:</b> после совещания за одну минуту зафиксированы три решения и три поручения с ответственными и сроками, а документ находится поиском по фразе из его текста.</div>
+      </div>
+    </div>
+    <div class="blk">
+      <div class="idx"><div class="b">5</div><div class="w">Нед. 10–12</div></div>
+      <div>
+        <h3>Mini App и дашборды</h3>
+        <p>Сетка календаря, таблица поручений с фильтрами, карточки. Четыре интерфейса целиком. Дашборды с 15 показателями. Полноценная админка: рабочие часы, квоты, шаблоны, переключатели функций, состояние системы. Переводы на узбекский.</p>
+        <div class="dod"><b>Готово, когда:</b> руководитель открывает один экран и за пять секунд понимает: что сейчас, что дальше, что требует решения, что просрочено.</div>
+      </div>
+    </div>
+    <div class="blk">
+      <div class="idx"><div class="b">6</div><div class="w">Нед. 13–14</div></div>
+      <div>
+        <h3>ИИ и вторая волна функций</h3>
+        <p>Голосовое поручение, утренняя сводка, поиск своими словами, недельный отчёт, протокол встречи. Бюджет и отключение по лимиту. Повторяющиеся встречи и поручения, согласование документов, опросы, переговорные, передача дел.</p>
+        <div class="dod"><b>Готово, когда:</b> руководитель наговорил поручение голосом, подтвердил одной кнопкой, исполнитель получил задачу — и на следующее утро пришла сводка, в которой всё сходится с цифрами системы.</div>
+      </div>
+    </div>
+  </div>
+
+  <p>Далее — пилот на 10–30 человек, сбор обратной связи, замеры и только потом расширение на организацию. На каждом шаге: ошибки, нагрузка, удобство, безопасность — и лишь затем следующая группа пользователей.</p>
+</section>
+
+<!-- 18 ───────────────────────────────────────────── -->
+<section id="s18">
+  <div class="shead"><span class="num">18</span><h2>Что нужно, чтобы начать</h2></div>
+  <ul class="check">
+    <li><span class="bx"></span><span><b>Сервер</b><span>Hetzner CX32, Ubuntu 24.04. Оплата картой, регистрация — 15 минут. Доступ по SSH-ключу.</span></span></li>
+    <li><span class="bx"></span><span><b>Домен</b><span>Поддомен компании или свой за ≈$10 в год. Нужен и для вебхука, и для Mini App — без него Telegram не откроет приложение.</span></span></li>
+    <li><span class="bx"></span><span><b>Бот</b><span>Создать у @BotFather. Токен передать через файл переменных окружения на сервере — не в переписку и не в репозиторий.</span></span></li>
+    <li><span class="bx"></span><span><b>Ключ OpenAI</b><span>Тем же способом. Понадобится только на блоке 6 — можно подключить позже.</span></span></li>
+    <li><span class="bx"></span><span><b>Список отделов</b><span>Названия подразделений и кто их возглавляет. Достаточно текстом.</span></span></li>
+    <li><span class="bx"></span><span><b>Рабочие параметры руководителя</b><span>Часы приёма, обед, максимум встреч подряд, предпочтительная длительность.</span></span></li>
+    <li><span class="bx"></span><span><b>Первые пять человек</b><span>Руководитель, ассистент и три сотрудника из разных отделов — на них проверяется каждый блок.</span></span></li>
+  </ul>
+</section>
+
+<!-- 19 ───────────────────────────────────────────── -->
+<section id="s19">
+  <div class="shead"><span class="num">19</span><h2>Риски</h2></div>
+  <div class="tw"><table>
+    <thead><tr><th>Риск</th><th>Насколько вероятен</th><th>Что делаем</th></tr></thead>
+    <tbody>
+      <tr><td><b>Руководитель не начнёт пользоваться</b></td><td><span class="chip c-late">Главный</span></td><td>Ассистент — основной пользователь. Продукт полезен, даже если руководитель открывает только сводку и жмёт две кнопки</td></tr>
+      <tr><td><b>Слишком много уведомлений</b></td><td><span class="chip c-attn">Высокий</span></td><td>Группировка, тихие часы, эскалация с фильтрацией, руководителю — только сводкой</td></tr>
+      <tr><td><b>Объём работ больше срока</b></td><td><span class="chip c-attn">Высокий</span></td><td>Шесть блоков, каждый полезен сам по себе. Отставание сдвигает следующий блок, а не ломает предыдущий</td></tr>
+      <tr><td><b>Сотрудники не заполняют данные</b></td><td><span class="chip c-prog">Средний</span></td><td>Минимум полей, значения по умолчанию, действие в одно касание, ничего не вводится вручную дважды</td></tr>
+      <tr><td><b>ИИ ошибается</b></td><td><span class="chip c-prog">Средний</span></td><td>Все цифры считает система. ИИ только предлагает, человек подтверждает</td></tr>
+      <tr><td><b>Утечка данных руководства</b></td><td><span class="chip c-prog">Средний</span></td><td>Права на уровне записи, приватные встречи, отдельные права на файлы, журнал аудита, администратор без доступа к содержанию</td></tr>
+      <tr><td><b>Потеря сервера или данных</b></td><td><span class="chip c-new">Низкий</span></td><td>Ежедневные копии вне сервера, проверка восстановления раз в месяц, переезд к другому провайдеру за 15 минут</td></tr>
+      <tr><td><b>Сбой Telegram</b></td><td><span class="chip c-new">Низкий</span></td><td>Очередь не теряет события: после восстановления связи всё уходит адресатам</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>
+  <p>SETA · Архитектура версии 1.0 · 31 августа 2026. Документ отражает решения, принятые в ходе проектного разбора: стек, модель данных, права, ИИ-контур, порядок работ. Изменения в нём — через новую версию, а не правку по месту.</p>
+</footer>
+
+</main>
+</div>
+</div>

@@ -1,0 +1,18 @@
+# Оверрайд для разработки: исходники монтируются внутрь контейнера,
+# поэтому правка кода не требует пересборки образа, а сгенерированные
+# миграции остаются в репозитории.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+services:
+  migrate:
+    volumes:
+      - .:/app
+
+  bot:
+    volumes:
+      - .:/app
+
+  api:
+    volumes:
+      - .:/app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

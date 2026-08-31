@@ -1,0 +1,39 @@
+#!/bin/sh
+# Не даёт закоммитить секрет.
+#
+# Проверяет ровно то, на чём этот проект уже обжёгся: реальный токен бота,
+# ключ OpenAI и непустой пароль в файлах-примерах. Проверяются только
+# файлы, попавшие в индекс.
+#
+# Включается один раз:  git config core.hooksPath .githooks
+
+found=0
+
+# 1. Токен Telegram: цифры, двоеточие, длинная строка. В примерах его быть не должно.
+if git diff --cached -U0 | grep -qE '^\+[^+].*[0-9]{8,10}:[A-Za-z0-9_-]{30,}'; then
+    echo "ОТКАЗ: в изменениях найден токен Telegram-бота."
+    found=1
+fi
+
+# 2. Ключ OpenAI
+if git diff --cached -U0 | grep -qE '^\+.*sk-[A-Za-z0-9_-]{20,}'; then
+    echo "ОТКАЗ: в изменениях найден ключ OpenAI."
+    found=1
+fi
+
+# 3. Сам файл .env не должен попадать в индекс никогда
+if git diff --cached --name-only | grep -qE '(^|/)\.env$'; then
+    echo "ОТКАЗ: файл .env не должен попадать в репозиторий."
+    found=1
+fi
+
+if [ "$found" = "1" ]; then
+    echo
+    echo "Секреты живут только в .env — он в .gitignore."
+    echo "В .env.example оставляйте заглушки вида 123456:PUT_YOUR_TOKEN_HERE."
+    echo
+    echo "Если это ложное срабатывание: git commit --no-verify"
+    exit 1
+fi
+
+exit 0
