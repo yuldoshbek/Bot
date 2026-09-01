@@ -54,10 +54,11 @@ from app.models.enums import (
     Availability,
     NotificationPriority,
     ParticipantRole,
+    QuotaPeriod,
     RequestStatus,
     RoleCode,
 )
-from app.services import attendance, meetings, slots as slot_service
+from app.services import attendance, meetings, quotas, slots as slot_service
 from app.services.availability import set_state
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 
@@ -1215,7 +1216,137 @@ async def main() -> None:
         check(count == 1, "в обезличенной выборке оценка учтена", f"их {count}")
         check(average == 1.0, "со своим значением", f"{average}")
 
-    print("\n28. Уборка не трогает боевые данные")
+    print("\n28. Лимиты времени")
+    week = MONDAY + timedelta(days=35)          # понедельник
+    moment = at(week, 8)
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+
+        free = await quotas.view(session, owner=chief, subject=worker, now=moment)
+        check(free.unlimited, "без нормы лимита нет")
+        check(
+            not await quotas.would_exceed(
+                session, owner=chief, subject=worker, minutes=600, now=moment
+            ),
+            "и десять часов не превышают ненайденную норму",
+        )
+
+        dept = Department(organization_id=org_id, name="ТЕСТ отдел")
+        session.add(dept)
+        await session.flush()
+        worker.department_id = dept.id
+        session.add(TimeQuota(
+            organization_id=org_id, owner_id=chief_id,
+            subject_department_id=dept.id, minutes=60, period=QuotaPeriod.WEEK,
+        ))
+        await session.flush()
+
+        empty = await quotas.view(session, owner=chief, subject=worker, now=moment)
+        check(empty.limit == 60, "отдельская норма нашлась", f"{empty.limit}")
+        check(empty.spent == 0, "расход пока нулевой", f"{empty.spent}")
+        check(empty.left == 60, "остаток равен норме", f"{empty.left}")
+
+        # Две встречи по полчаса в этой неделе.
+        for hour in (9, 10):
+            m = await busy(session, chief, at(week, hour), at(week, hour, 30), "ТЕСТ расход")
+            session.add(MeetingParticipant(
+                meeting_id=m.id, user_id=worker_id,
+                role=ParticipantRole.REQUIRED, created_at=utcnow(),
+            ))
+        await session.flush()
+
+        used = await quotas.view(session, owner=chief, subject=worker, now=moment)
+        check(used.spent == 60, "расход считается по встречам периода", f"{used.spent}")
+        check(used.left == 0, "остатка не осталось", f"{used.left}")
+
+        # Отменённая времени не съела.
+        dead = await busy(session, chief, at(week, 11), at(week, 12), "ТЕСТ отменённая")
+        dead.status = MeetingStatus.CANCELLED
+        session.add(MeetingParticipant(
+            meeting_id=dead.id, user_id=worker_id,
+            role=ParticipantRole.REQUIRED, created_at=utcnow(),
+        ))
+        await session.flush()
+        after_cancel = await quotas.view(session, owner=chief, subject=worker, now=moment)
+        check(after_cancel.spent == 60, "отменённая в расход не идёт", f"{after_cancel.spent}")
+
+        # Встреча прошлой недели в этот период не попадает.
+        # Вторник предыдущей недели: тот понедельник уже занят встречей из
+        # проверки явки, а пересечения запрещает сама база.
+        last_week = week - timedelta(days=6)
+        old = await busy(
+            session, chief, at(last_week, 9), at(last_week, 11), "ТЕСТ прошлая неделя",
+        )
+        session.add(MeetingParticipant(
+            meeting_id=old.id, user_id=worker_id,
+            role=ParticipantRole.REQUIRED, created_at=utcnow(),
+        ))
+        await session.flush()
+        this_week = await quotas.view(session, owner=chief, subject=worker, now=moment)
+        check(this_week.spent == 60, "прошлая неделя в расход не идёт", f"{this_week.spent}")
+        check(
+            to_local(this_week.period_start, "Asia/Tashkent").weekday() == 0,
+            "период начинается в понедельник по местному календарю",
+        )
+
+    print("\n29. Превышение помечает, но не запрещает")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+
+        check(
+            await quotas.would_exceed(
+                session, owner=chief, subject=worker, minutes=30, now=moment
+            ),
+            "тридцать минут сверх исчерпанной нормы — это превышение",
+        )
+        outcome = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(week, 15), duration_minutes=30,
+            title="ТЕСТ сверх лимита", now=moment,
+        )
+        check(outcome.ok, "заявка сверх лимита всё равно создаётся", outcome.reason or "")
+        check(outcome.request.over_quota, "и помечена как сверхлимитная")
+        letter = await session.scalar(
+            select(Notification.body).where(
+                Notification.event_key == f"meeting_request:{outcome.request.id}:new"
+            )
+        )
+        check("Сверх лимита" in letter, "руководитель видит пометку в письме")
+
+        separate = await quotas.over_quota_requests(session, owner=chief)
+        check(
+            any(r.id == outcome.request.id for r in separate),
+            "и такие заявки собраны отдельно",
+            f"их {len(separate)}",
+        )
+
+        # Личное исключение сильнее отдельской нормы.
+        session.add(TimeQuota(
+            organization_id=org_id, owner_id=chief_id,
+            subject_user_id=worker_id, minutes=240, period=QuotaPeriod.WEEK,
+        ))
+        await session.flush()
+        personal = await quotas.view(session, owner=chief, subject=worker, now=moment)
+        check(personal.limit == 240, "личная норма перебивает отдельскую", f"{personal.limit}")
+        check(
+            not await quotas.would_exceed(
+                session, owner=chief, subject=worker, minutes=30, now=moment
+            ),
+            "и та же заявка в неё укладывается",
+        )
+        calm = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(week, 16), duration_minutes=30,
+            title="ТЕСТ в пределах нормы", now=moment,
+        )
+        check(calm.ok, "заявка в пределах нормы проходит", calm.reason or "")
+        check(not calm.request.over_quota, "и пометки на ней нет")
+
+    print("\n30. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

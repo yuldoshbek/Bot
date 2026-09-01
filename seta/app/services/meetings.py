@@ -37,7 +37,7 @@ from app.models import (
     User,
     WorkingHours,
 )
-from app.services import slots as slot_service
+from app.services import quotas, slots as slot_service
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
 from app.services.rbac import can_access_object, has_permission, load_grants
@@ -143,6 +143,12 @@ async def create_request(
             start_at=start_at,
             end_at=end_at,
             status=RequestStatus.NEW,
+            # Норма не запрещает, а помечает: срочный вопрос не должен
+            # упираться в лимит, но и расходоваться время не должно молча.
+            over_quota=await quotas.would_exceed(
+                session, owner=owner, subject=initiator,
+                minutes=duration_minutes, now=now,
+            ),
         )
         session.add(request)
         await session.flush()
@@ -176,6 +182,7 @@ async def create_request(
             f"📅 <b>Запрос встречи</b>\n\n{esc(title)}\n"
             f"Кто: {esc(initiator.full_name)}\n"
             f"Когда: {when} · {duration_minutes} мин"
+            + ("\n\n⚠️ Сверх лимита времени" if request.over_quota else "")
         ),
         payload={"request_id": request.id},
         timezone_name=owner.timezone,
