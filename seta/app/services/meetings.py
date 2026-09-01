@@ -667,3 +667,66 @@ async def quick(
         after={"participants": [p.id for p in people]},
     )
     return Result(meeting=meeting)
+
+
+async def finish(
+    session: AsyncSession,
+    *,
+    meeting: Meeting,
+    actor: User,
+    now: datetime | None = None,
+) -> Result:
+    """Завершает встречу. Это момент, когда собираются итоги.
+
+    Завершение необратимо: «встреча состоялась» — факт, а не состояние, которое
+    можно переключать туда-обратно. Карточка при этом остаётся: решения
+    и поручения к ней продолжают привязываться.
+    """
+    now = now or utcnow()
+    if actor.organization_id != meeting.organization_id:
+        return Result(reason="Встреча другой организации.")
+    if meeting.status == MeetingStatus.CANCELLED:
+        return Result(reason="Встреча отменена, завершать нечего.")
+    if meeting.status == MeetingStatus.FINISHED:
+        return Result(reason="Встреча уже завершена.")
+    if now < meeting.start_at:
+        return Result(reason="Встреча ещё не началась.")
+
+    people = await participants_of(session, meeting)
+    if not await _may(
+        session, actor, "meeting.finish",
+        owner_id=meeting.owner_id, related={p.id for p in people},
+    ):
+        return Result(reason="Завершить встречу может организатор или его ассистент.")
+
+    meeting.status = MeetingStatus.FINISHED
+    meeting.finished_at = now
+    await session.flush()
+
+    await write_audit(
+        session, actor_id=actor.id, action="meeting.finish",
+        entity_type="meeting", entity_id=meeting.id,
+        after={"finished_at": now.isoformat()},
+    )
+    return Result(meeting=meeting)
+
+
+async def by_participant(
+    session: AsyncSession, *, user: User, since: datetime, until: datetime,
+    statuses: tuple[str, ...] | None = None,
+) -> list[Meeting]:
+    """Встречи человека за период. Общая выборка для карточек, досье и выгрузки."""
+    query = (
+        select(Meeting)
+        .join(MeetingParticipant, MeetingParticipant.meeting_id == Meeting.id)
+        .where(
+            MeetingParticipant.user_id == user.id,
+            Meeting.start_at >= since,
+            Meeting.start_at < until,
+        )
+    )
+    if statuses:
+        query = query.where(Meeting.status.in_(statuses))
+    return list(
+        (await session.execute(query.order_by(Meeting.start_at).distinct())).scalars().all()
+    )

@@ -1,9 +1,21 @@
 from app.models.audit import AuditLog
 from app.models.base import Base
 from app.models.error import ErrorLog
+from app.models.decision import AgendaItem, Decision
+from app.models.document import (
+    Document,
+    DocumentAccess,
+    DocumentText,
+    DocumentView,
+    DownloadToken,
+)
 from app.models.enums import (
     AbsenceKind,
     Availability,
+    DecisionStatus,
+    DocumentScope,
+    IndexStatus,
+    ViewChannel,
     ExtensionStatus,
     AttendanceSource,
     MeetingStatus,
@@ -98,4 +110,15 @@ __all__ = [
     "RequestStatus",
     "AbsenceKind",
     "Scope",
+    "AgendaItem",
+    "Decision",
+    "DecisionStatus",
+    "Document",
+    "DocumentAccess",
+    "DocumentScope",
+    "DocumentText",
+    "DocumentView",
+    "DownloadToken",
+    "IndexStatus",
+    "ViewChannel",
 ]

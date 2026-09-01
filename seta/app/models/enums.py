@@ -139,3 +139,33 @@ class AttendanceSource(StrEnum):
 class QuotaPeriod(StrEnum):
     WEEK = "WEEK"
     MONTH = "MONTH"
+
+
+class DecisionStatus(StrEnum):
+    """Решение не удаляют — его закрывают или отменяют."""
+    OPEN = "OPEN"                  # принято, исполняется
+    DONE = "DONE"                  # выполнено
+    CANCELLED = "CANCELLED"        # отменено, остаётся в реестре с причиной
+
+
+class DocumentScope(StrEnum):
+    """Кому документ открыт по умолчанию. Точечные выдачи — сверх этого."""
+    PRIVATE = "PRIVATE"            # только загрузивший
+    PARTICIPANTS = "PARTICIPANTS"  # участники привязанной встречи или поручения
+    DEPARTMENT = "DEPARTMENT"      # отдел загрузившего
+    ORGANIZATION = "ORGANIZATION"  # вся организация
+
+
+class IndexStatus(StrEnum):
+    """Что случилось с извлечением текста."""
+    PENDING = "PENDING"            # ждёт разбора
+    DONE = "DONE"                  # текст извлечён и проиндексирован
+    EMPTY = "EMPTY"                # разобран, но текста внутри нет (скан, картинка)
+    FAILED = "FAILED"              # разбор не удался, документ остаётся доступен
+    TOO_LARGE = "TOO_LARGE"        # больше лимита скачивания бота — не разобрать
+    UNSUPPORTED = "UNSUPPORTED"    # формат без извлечения текста
+
+
+class ViewChannel(StrEnum):
+    BOT = "BOT"
+    LINK = "LINK"

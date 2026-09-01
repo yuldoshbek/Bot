@@ -42,6 +42,13 @@ class Meeting(Base, PKMixin, TimestampMixin):
     __tablename__ = "meetings"
     __table_args__ = (
         Index("ix_meetings_owner_start", "owner_id", "start_at"),
+        # Поиск по теме с русской морфологией. Выражение неизменяемо, поэтому
+        # индекс строится по нему напрямую, без отдельной таблицы индекса.
+        Index(
+            "ix_meetings_search",
+            text("to_tsvector('russian', title || ' ' || coalesce(description, ''))"),
+            postgresql_using="gin",
+        ),
         Index("ix_meetings_org_start", "organization_id", "start_at"),
         # Двойное бронирование календаря невозможно физически. Отменённые
         # встречи из правила исключены: их время снова свободно.

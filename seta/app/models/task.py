@@ -24,6 +24,12 @@ class Task(Base, PKMixin, TimestampMixin):
     __tablename__ = "tasks"
     __table_args__ = (
         Index("ix_tasks_assignee_status_due", "assignee_id", "status", "due_at"),
+        # Поиск по формулировке поручения с русской морфологией.
+        Index(
+            "ix_tasks_search",
+            text("to_tsvector('russian', title || ' ' || coalesce(description, ''))"),
+            postgresql_using="gin",
+        ),
         Index("ix_tasks_reviewer_status", "reviewer_id", "status"),
         Index("ix_tasks_creator_status", "creator_id", "status"),
         # Планировщик читает только поручения с близким сроком. Частичный индекс
