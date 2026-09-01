@@ -6,7 +6,7 @@
 Четыре цикла с разной частотой:
   доставка  - каждые 3 секунды (цель по задержке очереди: не больше 5 секунд);
   сроки     - раз в минуту;
-  встречи   - раз в минуту: снимает удержания без решения и зовёт отметиться;
+  встречи   - раз в минуту: удержания, досье за полчаса, отметка за пять минут;
   документы - раз в полминуты: достаёт текст из загруженных файлов.
 
 Оба защищены распределённой блокировкой в Redis: даже если запустить второй
@@ -17,7 +17,7 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
-from app.services import attendance, deadlines, indexer, meetings
+from app.services import attendance, briefing, deadlines, indexer, meetings
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
 
@@ -92,9 +92,13 @@ async def meeting_loop() -> None:
                 try:
                     async with session_scope() as session:
                         released = await meetings.expire_holds(session)
+                        briefed = await briefing.send_briefings(session)
                         called = await attendance.open_checkins(session)
-                    if released or called:
-                        log.info("окон освобождено %s, позвано отметиться %s", released, called)
+                    if released or briefed or called:
+                        log.info(
+                            "окон освобождено %s, досье %s, позвано отметиться %s",
+                            released, briefed, called,
+                        )
                 finally:
                     await release_lock("meetings:upkeep")
         except Exception as error:

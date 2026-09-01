@@ -52,7 +52,9 @@ from app.models import (
     WorkingHours,
 )
 from app.models.enums import RoleCode
+from app.services import briefing
 from app.services import decisions as registry
+from app.services import export
 from app.services import documents as docs
 from app.services import indexer
 from app.services import search
@@ -60,6 +62,9 @@ from app.services import tasks as task_service
 from app.services import meetings as meeting_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants, visible_department_ids
+
+from openpyxl import load_workbook
+from pypdf import PdfReader
 
 LF = bytes([10])
 TEST_ORG_PREFIX = "ТЕСТ "
@@ -1049,7 +1054,186 @@ async def main() -> None:
             "и чужая организация поручение не видит",
         )
 
-    print("\n15. Уборка не трогает боевые данные")
+    print("\n15. Досье к встрече")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker, head = who["руководитель"], who["сотрудник"], who["начальник"]
+        soon_day = MONDAY + timedelta(days=7)
+
+        upcoming = Meeting(
+            organization_id=chief.organization_id, owner_id=chief.id,
+            title="ТЕСТ разбор поставки", start_at=at(soon_day, 15),
+            end_at=at(soon_day, 16), status=MeetingStatus.CONFIRMED, created_by=chief.id,
+        )
+        session.add(upcoming)
+        await session.flush()
+        for uid in (chief.id, worker.id, head.id):
+            session.add(MeetingParticipant(
+                meeting_id=upcoming.id, user_id=uid,
+                role=ParticipantRole.REQUIRED, created_at=utcnow(),
+            ))
+        await session.flush()
+
+        # Документ, открытый только автору: в чужом досье его быть не должно
+        # даже названием.
+        private = await docs.store(
+            session, uploader=worker, file_id="id-досье", file_unique_id="u-досье",
+            file_name="личная записка.txt", size_bytes=100,
+            meeting=upcoming, scope=DocumentScope.PRIVATE,
+        )
+        shared = await docs.store(
+            session, uploader=worker, file_id="id-общий", file_unique_id="u-общий",
+            file_name="повестка.txt", size_bytes=100,
+            meeting=upcoming, scope=DocumentScope.ORGANIZATION,
+        )
+        await session.flush()
+
+        early = await briefing.send_briefings(session, now=at(soon_day, 12))
+        check(early == 0, "за три часа досье не уходит", f"писем: {early}")
+
+        sent = await briefing.send_briefings(session, now=at(soon_day, 14, 45))
+        check(sent == 3, "за пятнадцать минут досье ушло всем троим", f"писем: {sent}")
+
+        again = await briefing.send_briefings(session, now=at(soon_day, 14, 50))
+        check(again == 0, "повторный проход второй раз не шлёт", f"писем: {again}")
+
+        own = await briefing.build(
+            session, meeting=upcoming, viewer=worker, now=at(soon_day, 14, 45)
+        )
+        check("личная записка" in own, "автор видит свой документ в досье")
+        check("повестка" in own, "и общий тоже")
+
+        theirs = await briefing.build(
+            session, meeting=upcoming, viewer=head, now=at(soon_day, 14, 45)
+        )
+        check(
+            "личная записка" not in theirs,
+            "а другому участнику закрытый документ не показан даже названием",
+            theirs[:120],
+        )
+        check("повестка" in theirs, "общий документ при этом виден ему")
+        check("ТЕСТ разбор поставки" in theirs, "тема встречи в досье есть")
+
+        # Прошлое незакрытое решение по этим же людям.
+        old_decision = await registry.create(
+            session, actor=chief, title="ТЕСТ проверить остатки на складе",
+            responsible=worker,
+        )
+        await session.flush()
+        with_history = await briefing.build(
+            session, meeting=upcoming, viewer=chief, now=at(soon_day, 14, 45)
+        )
+        check(
+            "проверить остатки" in with_history,
+            "прошлое незакрытое решение попало в досье",
+            with_history[-200:],
+        )
+
+        # Перенос — другое время, досье нужно заново.
+        upcoming.reschedule_count += 1
+        upcoming.start_at = at(soon_day, 17)
+        upcoming.end_at = at(soon_day, 18)
+        await session.flush()
+        after_move = await briefing.send_briefings(session, now=at(soon_day, 16, 45))
+        check(after_move == 3, "после переноса досье уходит заново", f"писем: {after_move}")
+
+    print("\n16. Выгрузка в Excel и PDF")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        # Период берём с запасом назад: поручения создаются по настоящим
+        # часам, а опорный понедельник проверки лежит в будущем.
+        since, until = at(MONDAY - timedelta(days=120), 0), at(MONDAY + timedelta(days=60), 0)
+
+        data, name, why = await export.build(
+            session, user=chief, grants=await load_grants(session, chief),
+            kind="tasks", since=since, until=until, fmt="xlsx",
+        )
+        check(data is not None, "выгрузка поручений собрана", why or "")
+        check(name.endswith(".xlsx"), "имя файла с нужным расширением", name)
+
+        book = load_workbook(io.BytesIO(data))
+        page = book.active
+        rows = list(page.iter_rows(min_row=2, values_only=True))
+        check(bool(rows), "в файле есть строки", f"строк {len(rows)}")
+        check(
+            page.cell(row=1, column=2).value == "Поручение",
+            "заголовки на месте",
+            str(page.cell(row=1, column=2).value),
+        )
+        check(
+            any("стеллажи" in str(r[1]).lower() for r in rows),
+            "и в нём именно наши данные",
+            f"{[r[1] for r in rows][:3]}",
+        )
+
+        # Выгрузка обязана показывать ровно то же, что интерфейс.
+        visible = await visible_department_ids(session, chief)
+        in_view = await session.scalar(
+            select(func.count(Task.id)).where(
+                *task_service.visible_filter(chief, await load_grants(session, chief), visible),
+                Task.created_at >= since, Task.created_at < until,
+            )
+        )
+        check(len(rows) == in_view, "строк ровно столько, сколько видно в списке",
+              f"{len(rows)} против {in_view}")
+
+        worker_data, _, _ = await export.build(
+            session, user=worker, grants=await load_grants(session, worker),
+            kind="tasks", since=since, until=until, fmt="xlsx",
+        )
+        worker_rows = (
+            list(load_workbook(io.BytesIO(worker_data)).active.iter_rows(min_row=2, values_only=True))
+            if worker_data else []
+        )
+        check(
+            len(worker_rows) < len(rows),
+            "сотрудник выгружает меньше, чем руководитель",
+            f"{len(worker_rows)} против {len(rows)}",
+        )
+
+        pdf_data, pdf_name, why = await export.build(
+            session, user=chief, grants=await load_grants(session, chief),
+            kind="decisions", since=since, until=until, fmt="pdf",
+        )
+        check(pdf_data is not None, "выгрузка решений в PDF собрана", why or "")
+        check(pdf_data[:5] == b"%PDF-", "это настоящий PDF", str(pdf_data[:8]))
+        page_text = PdfReader(io.BytesIO(pdf_data)).pages[0].extract_text()
+        check("Решения" in page_text, "заголовок читается", page_text[:60])
+        check(
+            "стеллажи" in page_text.lower(),
+            "и кириллица в таблице не превратилась в вопросы",
+            page_text[:200],
+        )
+
+        nothing, _, why = await export.build(
+            session, user=chief, grants=await load_grants(session, chief),
+            kind="meetings",
+            since=at(MONDAY - timedelta(days=400), 0),
+            until=at(MONDAY - timedelta(days=390), 0),
+        )
+        check(nothing is None, "пустой период даёт честный ответ, а не пустой файл", why or "")
+        check(why is not None and "нет" in why.lower(), "с понятным объяснением", why or "")
+
+        outsider = (
+            await session.execute(
+                select(User).join(Organization, Organization.id == User.organization_id)
+                .where(Organization.name == f"{TEST_ORG_PREFIX}Чужая")
+            )
+        ).scalar_one()
+        alien, _, _ = await export.build(
+            session, user=outsider, grants=await load_grants(session, outsider),
+            kind="tasks", since=since, until=until,
+        )
+        check(alien is None, "чужая организация не выгружает ничего")
+
+        wrong, _, why = await export.build(
+            session, user=chief, grants=await load_grants(session, chief),
+            kind="секреты", since=since, until=until,
+        )
+        check(wrong is None, "неизвестный вид выгрузки отклоняется", why or "")
+
+    print("\n17. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(
