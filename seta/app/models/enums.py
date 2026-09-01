@@ -115,3 +115,27 @@ class NotificationPriority(StrEnum):
     LOW = "LOW"                    # копится в сводку
     NORMAL = "NORMAL"              # ждёт окончания тихих часов
     CRITICAL = "CRITICAL"          # уходит немедленно, тихие часы не действуют
+
+
+class ParticipantRole(StrEnum):
+    """Зачем человек на встрече."""
+    ORGANIZER = "ORGANIZER"
+    REQUIRED = "REQUIRED"          # присутствие обязательно
+    OPTIONAL = "OPTIONAL"          # можно не приходить
+
+
+class ParticipantResponse(StrEnum):
+    NEW = "NEW"
+    ACCEPTED = "ACCEPTED"
+    DECLINED = "DECLINED"
+
+
+class AttendanceSource(StrEnum):
+    """Кто отметил явку: сам человек или ассистент."""
+    SELF = "SELF"
+    ASSISTANT = "ASSISTANT"
+
+
+class QuotaPeriod(StrEnum):
+    WEEK = "WEEK"
+    MONTH = "MONTH"
