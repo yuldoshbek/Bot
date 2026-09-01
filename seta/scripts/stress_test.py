@@ -322,10 +322,13 @@ async def seed() -> dict[str, int]:
             ("head", RoleCode.DEPT_HEAD), ("worker", RoleCode.EMPLOYEE),
             ("stranger", RoleCode.EMPLOYEE),
         ):
+            # У одного сотрудника имя с угловыми скобками: любой экран, где
+            # показывается ФИО, обязан пережить это без поломки разметки.
+            name = f"ТЕСТ <{key}> и <b>жирный</b>" if key == "worker" else f"ТЕСТ {key}"
             person = User(
                 organization_id=org.id,
                 telegram_user_id=TG[key],
-                full_name=f"ТЕСТ {key}",
+                full_name=name,
                 status=UserStatus.ACTIVE,
                 department_id=department.id if key in ("head", "worker") else None,
                 timezone="Asia/Tashkent",
@@ -472,14 +475,14 @@ async def main() -> None:
             select(Task.id).where(Task.creator_id == ids["head"]).order_by(Task.id.desc()).limit(4)
         )
         junk_ids = [row[0] for row in rows.all()]
-    net.errors.clear()
+    errors_before = len(net.errors)
     for junk_id in junk_ids:
         await hit(callback_update(bot, TG["head"], f"t:open:{junk_id}"))
         await hit(callback_update(bot, TG["worker"], f"t:open:{junk_id}"))
     check(
-        not net.errors,
+        len(net.errors) == errors_before,
         "карточка с тегами в названии отправляется без ошибок разметки",
-        "; ".join(net.errors[:2]),
+        "; ".join(net.errors[errors_before:][:2]),
     )
 
     print("\n9. Кривые даты десять раз подряд")
@@ -519,7 +522,11 @@ async def main() -> None:
           f"открытых запросов: {pending}")
 
     print("\n11. Ответы бота и отзывчивость")
-    check(not net.errors, "ни одно сообщение не превысило лимит Telegram", "; ".join(net.errors[:3]))
+    check(
+        not net.errors,
+        "за весь прогон ни одно сообщение не было отвергнуто Telegram",
+        "; ".join(net.errors[:3]),
+    )
     slow = [t for t in timings if t > 1.0]
     average = sum(timings) / len(timings) if timings else 0
     check(

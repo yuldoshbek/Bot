@@ -100,7 +100,7 @@ async def new_task_assignee(call: CallbackQuery, state: FSMContext, session: Asy
 
     await state.update_data(assignee_id=assignee.id, assignee_name=assignee.full_name)
     await call.answer()
-    await call.message.edit_text(f"<b>Новое поручение</b>\n\n👤 Кому: {assignee.full_name}")
+    await call.message.edit_text(f"<b>Новое поручение</b>\n\n👤 Кому: {esc(assignee.full_name)}")
     await call.message.answer("Что нужно сделать? Напишите одной строкой.")
     await state.set_state(NewTask.title)
 
