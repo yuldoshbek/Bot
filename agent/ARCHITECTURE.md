@@ -30,18 +30,25 @@ Telegram или повторный запуск обработчика не со
 ```
 seta/
   app/
-    core/       config.py, db.py, redis.py, timeutil.py
-    models/     base, enums, org, user, rbac, schedule, audit
-    services/   rbac, registration, availability, bootstrap, audit
-    bot/        loader, run, middlewares/auth, handlers/*, keyboards/*
+    core/       config, db, redis, timeutil, dates (разбор сроков), text (экранирование)
+    models/     base, enums, org, user, rbac, schedule, task, notification, audit
+    services/   rbac, registration, availability, tasks, deadlines,
+                notifications, bootstrap, audit
+    bot/        loader, run, utils, middlewares/auth, handlers/*, keyboards/*
+    workers/    runner.py: доставка уведомлений и контроль сроков
     api/        main.py: вебхук + /health
-  migrations/   версии схемы (Alembic)
-  scripts/      smoke_block1.py и служебные
+  migrations/   версии схемы (Alembic), три миграции
+  scripts/      smoke_block1, smoke_block2, smoke_hardening, stress_test,
+                make_admin, backup.sh, restore.sh
 ```
+
+Подробное назначение каждого файла — `STRUCTURE.md` в корне репозитория.
 
 ## Модель данных
 
-Реализовано (блок 1) — 16 таблиц:
+**23 таблицы.** Блоки 1 и 2 реализованы полностью, плюс блок укрепления.
+
+Блок 1 — ядро:
 
 | Таблица | Назначение |
 |---|---|
@@ -59,17 +66,36 @@ seta/
 | `holidays` | Праздники и перенесённые рабочие дни |
 | `audit_log` | Журнал: только добавление, поля «было/стало», настоящий автор |
 
-Запланировано (блоки 2–6): `tasks`, `task_events`, `task_comments`, `task_extensions`,
-`task_dependencies`, `task_templates`, `recurring_tasks`, `meetings`,
-`meeting_participants`, `meeting_attendance`, `meeting_ratings`, `meeting_requests`,
-`slot_holds`, `rooms`, `room_bookings`, `decisions`, `files`, `file_texts`,
-`time_quotas`, `notifications`, `notification_templates`, `notification_prefs`,
-`approvals`, `polls`, `poll_votes`, `ai_jobs`, `ai_budget`, `feature_flags`,
-`ui_config`, `search_index`, `feedback`.
+Блок 2 — поручения:
+
+| Таблица | Назначение |
+|---|---|
+| `tasks` | Центральный объект. `escalation_level` хранит пройденную ступень эскалации, `extensions_count` — номер продления (входит в ключи уведомлений) |
+| `task_events` | История: кто, что и когда изменил |
+| `task_comments` | Обсуждение и файлы внутри поручения |
+| `task_extensions` | Запросы на перенос срока. Частичный уникальный индекс: один открытый запрос на поручение |
+| `task_templates` | Типовые поручения (интерфейса пока нет) |
+| `notifications` | Очередь. `event_key` уникален — защита от дублей в схеме; `next_attempt_at` — откат при сбоях |
+
+Запланировано (блоки 3–6): `meetings`, `meeting_participants`, `meeting_attendance`,
+`meeting_ratings`, `meeting_requests`, `slot_holds`, `rooms`, `room_bookings`,
+`decisions`, `files`, `file_texts`, `time_quotas`, `notification_templates`,
+`notification_prefs`, `approvals`, `polls`, `ai_jobs`, `ai_budget`,
+`feature_flags`, `ui_config`, `search_index`, `feedback`.
 
 **Правила модели.** Все временные метки — `timestamptz` в UTC, показ в часовом
 поясе пользователя. `telegram_user_id` — 64-битное целое. Значения перечислений
 хранятся строками (читаемо в базе и в журнале).
+
+**Правила живут в схеме, а не только в коде.** Уникальный `event_key`, частичный
+уникальный индекс на открытые продления, `EXCLUDE USING gist` на пересечения
+блокировок календаря — их нельзя обойти по забывчивости вызывающего кода.
+Расширения `pg_trgm` и `btree_gist` включены, индексы под пересечение интервалов
+для блока 3 созданы заранее.
+
+**`organization_id` есть только там, где выборка идёт без якоря** —
+в `notifications` и `audit_log`. Остальные таблицы выбираются по `user_id`
+или `task_id`, которые организацию уже несут (решение Р-17).
 
 ## Права
 
@@ -104,8 +130,25 @@ seta/
 Стандартные порты на машине владельца заняты другими проектами, поэтому:
 Postgres — `55432`, Redis — `56379`, API — `8010` (только на `127.0.0.1`).
 
+## Поручения и контроль сроков
+
+Переходы состояний собраны в `app/services/tasks.py` — обработчики статус
+не меняют. Контроль сроков (`app/services/deadlines.py`) держится на трёх вещах:
+
+1. **Ступень эскалации в поручении** — в установившемся состоянии проход
+   планировщика не пишет в базу ничего.
+2. **Ключ события с номером продления** — после продления повторная просрочка
+   снова доходит до исполнителя.
+3. **Порог «меньше или равно», а не окно** — простой обработчика не теряет
+   напоминание, от повторов защищает `event_key`.
+
+Доставка (`app/services/notifications.py`): восемь попыток с растущей паузой,
+постоянные ошибки помечаются сразу, ограничение частоты Telegram откладывает
+доставку не тратя попытку, большие пачки режутся по 15 сообщений и 3500 символов.
+
 ## Что ещё не построено
 
-Блоки 2–6 по плану: поручения и контроль → календарь и встречи →
-встреча/решения/документы → Mini App и дашборды → ИИ и вторая волна функций.
-Состав каждого блока и критерии готовности — в `Архитектура SETA.html`, раздел 17.
+Блоки 3–6 по плану: календарь и встречи → встреча/решения/документы →
+Mini App и дашборды → ИИ и вторая волна функций. Состав каждого блока и критерии
+готовности — в `Архитектура SETA.html`, раздел 17. Фазовый план блока 3 —
+`agent/PLAN-block3.md`.

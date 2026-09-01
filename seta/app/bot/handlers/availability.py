@@ -113,9 +113,20 @@ async def switch_availability(
 
 @router.message(F.text == BTN_WHO_IS_OPEN)
 async def who_is_open(
-    message: Message, session: AsyncSession, organization: Organization, user: User
+    message: Message, session: AsyncSession, organization: Organization,
+    user: User, grants: dict[str, Grant],
 ) -> None:
-    """Экран сотрудника: кто из руководителей принимает прямо сейчас."""
+    """Экран сотрудника: кто из руководителей принимает прямо сейчас.
+
+    Право проверяется здесь, а не полагается на middleware: тот пропускает
+    неподтверждённого человека дальше, чтобы он мог закончить регистрацию,
+    и без этой проверки заметка руководителя («Кабинет 402») была бы видна
+    любому, кто нажал кнопку до подтверждения заявки.
+    """
+    if not has_permission(grants, "calendar.read_free"):
+        await message.answer("Раздел доступен сотрудникам организации.")
+        return
+
     rows = await open_executives(session, organization.id)
     if not rows:
         await message.answer(

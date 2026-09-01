@@ -33,7 +33,7 @@ from app.models.task import Task, TaskComment, TaskEvent, TaskExtension
 from app.models.user import User
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
-from app.services.rbac import Grant, has_permission, visible_department_ids
+from app.services.rbac import Grant, has_permission, user_role_codes, visible_department_ids
 
 # Статусы, в которых поручение считается живым.
 ACTIVE_STATUSES = (
@@ -93,16 +93,10 @@ async def resolve_reviewer(
     if not requires_review:
         return None
 
-    creator_roles = {
-        code
-        for (code,) in (
-            await session.execute(
-                select(Role.code)
-                .join(UserRole, UserRole.role_id == Role.id)
-                .where(UserRole.user_id == creator.id)
-            )
-        ).all()
-    }
+    # Роли берём через общую функцию: она учитывает срок действия так же,
+    # как load_grants. Отдельный запрос без этого фильтра означал бы, что
+    # истёкшая роль руководителя продолжает перенаправлять проверку ассистенту.
+    creator_roles = await user_role_codes(session, creator)
     if RoleCode.EXECUTIVE not in creator_roles:
         return creator.id
 

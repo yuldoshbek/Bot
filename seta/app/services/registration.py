@@ -183,8 +183,9 @@ async def start_registration(
         await grant_role(session, user, effective_role, granted_by=invite.created_by if invite else None)
 
     if is_first_admin:
-        # Роль администратора добавляется к запрошенной, а не вместо неё:
-        # первый человек в системе обычно и ассистент, и её настройщик.
+        # Права администратора добавляются к роли сотрудника: первому нужно
+        # завести отделы и подтвердить остальных, но не получить доступ
+        # к содержанию поручений руководства.
         await grant_role(session, user, RoleCode.ADMIN)
 
     if invite is not None:

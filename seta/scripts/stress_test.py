@@ -521,7 +521,48 @@ async def main() -> None:
     check(pending == 1, "открытым остаётся один запрос на продление, а не десять",
           f"открытых запросов: {pending}")
 
-    print("\n11. Ответы бота и отзывчивость")
+    print("\n11. Неподтверждённый человек и мусор в тексте")
+    # Руководитель отмечается доступным: без этого проверка ниже была бы слепой —
+    # «Сейчас принимают» не появилось бы ни у кого, и утечка осталась бы незамеченной.
+    await hit(text_update(bot, TG["chief"], "🟢 Моя доступность"))
+    await hit(callback_update(bot, TG["chief"], "av:OPEN:60"))
+
+    before_calls = len(net.calls)
+    await hit(text_update(bot, TG["worker"], "👤 Кто на связи"))
+    seen_by_employee = " ".join(
+        d.get("text", "") for n, d in net.calls[before_calls:] if n == "SendMessage"
+    )
+    check(
+        "Сейчас принимают" in seen_by_employee,
+        "подтверждённый сотрудник видит, кто на связи",
+        seen_by_employee[:120],
+    )
+
+    # Заявка, которая останется без подтверждения.
+    await hit(text_update(bot, TG["newbie"], "/start"))
+    await hit(text_update(bot, TG["newbie"], "Новиков Новичок"))
+    await hit(callback_update(bot, TG["newbie"], "reg:role:EMPLOYEE"))
+    await hit(contact_update(bot, TG["newbie"], "+998900000000"))
+
+    before_calls = len(net.calls)
+    blank_error = await hit(text_update(bot, TG["newbie"], "\xa0"))
+    check(
+        blank_error is None,
+        "сообщение из одних пробелов не роняет обработку",
+        str(blank_error or ""),
+    )
+
+    await hit(text_update(bot, TG["newbie"], "👤 Кто на связи"))
+    seen_by_newbie = " ".join(
+        d.get("text", "") for n, d in net.calls[before_calls:] if n == "SendMessage"
+    )
+    check(
+        "Сейчас принимают" not in seen_by_newbie,
+        "а неподтверждённый — не видит того же самого",
+        seen_by_newbie[:120],
+    )
+
+    print("\n12. Ответы бота и отзывчивость")
     check(
         not net.errors,
         "за весь прогон ни одно сообщение не было отвергнуто Telegram",

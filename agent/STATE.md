@@ -1,7 +1,8 @@
 # Текущее состояние
 
-**Обновлено:** 1 сентября 2026
-**Блоки:** 1 и 2 из 6 завершены, блок укрепления выполнен
+**Обновлено:** 1 сентября 2026 (день)
+**Блоки:** 1 и 2 из 6 завершены, блок укрепления выполнен,
+кодовая база прочитана целиком — четыре находки исправлены
 **Бот:** @Uzcosmos_meet_bot, режим long polling
 **Следующий:** блок 3 — календарь и встречи
 
@@ -101,10 +102,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_hardening.py # 41 сценарий
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/stress_test.py    # 23 проверки на прочность
+  run --rm --no-deps migrate python scripts/stress_test.py    # 26 проверок на прочность
 ```
 
-Везде ожидается `Ошибок: 0`. Итого 151 проверка. Прогонять все четыре перед началом нового блока.
+Везде ожидается `Ошибок: 0`. Итого 154 проверки. Прогонять все четыре перед началом нового блока.
 
 ### Подключение pgAdmin 4
 
