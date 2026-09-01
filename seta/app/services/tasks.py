@@ -33,7 +33,7 @@ from app.models.task import Task, TaskComment, TaskEvent, TaskExtension
 from app.models.user import User
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
-from app.services.rbac import Grant, has_permission, user_role_codes, visible_department_ids
+from app.services.rbac import Grant, Scope, has_permission, user_role_codes, visible_department_ids
 
 # Статусы, в которых поручение считается живым.
 ACTIVE_STATUSES = (
@@ -137,6 +137,7 @@ async def create_task(
     personal_control: bool = False,
     on_behalf_of_id: int | None = None,
     meeting_id: int | None = None,
+    decision_id: int | None = None,
 ) -> Task:
     if not title.strip():
         raise TaskError("У поручения должно быть название.")
@@ -159,7 +160,11 @@ async def create_task(
         status=TaskStatus.NEW,
         requires_review=needs_review,
         personal_control=personal_control,
+        # Откуда поручение родилось. Поручение из встречи идёт этим же путём,
+        # а не отдельной веткой: две ветки создания разойдутся на первой же
+        # правке жизненного цикла.
         meeting_id=meeting_id,
+        decision_id=decision_id,
     )
     session.add(task)
     await session.flush()
@@ -247,6 +252,10 @@ async def access_for(
     """
     access = TaskAccess()
     if not has_permission(grants, "task.read"):
+        return access
+    # Граница организации проверяется первой и всегда: без неё область
+    # «по организации» означала бы «по всем организациям сразу».
+    if task.organization_id != user.organization_id:
         return access
 
     is_assignee = task.assignee_id == user.id
@@ -717,3 +726,52 @@ async def _notify(
         payload={"task_id": task_id},
         timezone_name=recipient.timezone if recipient else None,
     )
+
+
+async def of_meeting(session: AsyncSession, meeting_id: int) -> list[Task]:
+    """Поручения, рождённые этой встречей."""
+    return list(
+        (
+            await session.execute(
+                select(Task).where(Task.meeting_id == meeting_id).order_by(Task.created_at)
+            )
+        ).scalars().all()
+    )
+
+
+async def of_decision(session: AsyncSession, decision_id: int) -> list[Task]:
+    """Поручения, выданные во исполнение решения."""
+    return list(
+        (
+            await session.execute(
+                select(Task).where(Task.decision_id == decision_id).order_by(Task.created_at)
+            )
+        ).scalars().all()
+    )
+
+
+def visible_filter(user: User, grants: dict[str, Grant], visible_departments: set[int]) -> list:
+    """Условие видимости поручений в SQL — зеркало `access_for(...).can_view`.
+
+    Нужно поиску: отфильтровать выдачу поштучно после `LIMIT` значит показать
+    пустую страницу вместо своих записей. Два описания одного правила обязаны
+    совпадать, и это проверяется отдельным сценарием, а не аккуратностью.
+    """
+    if not has_permission(grants, "task.read"):
+        return [Task.id.is_(None)]
+
+    same_org = Task.organization_id == user.organization_id
+    mine = or_(
+        Task.assignee_id == user.id,
+        Task.creator_id == user.id,
+        Task.reviewer_id == user.id,
+        Task.on_behalf_of_id == user.id,
+    )
+    scope = grants["task.read"].scope
+    if scope == Scope.ORGANIZATION:
+        return [same_org]
+    if scope == Scope.DEPARTMENT:
+        if not visible_departments:
+            return [same_org, mine]
+        return [same_org, or_(mine, Task.department_id.in_(visible_departments))]
+    return [same_org, mine]

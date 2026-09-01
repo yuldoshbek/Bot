@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +40,7 @@ from app.models import (
 from app.services import quotas, slots as slot_service
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
-from app.services.rbac import can_access_object, has_permission, load_grants
+from app.services.rbac import Grant, Scope, can_access_object, has_permission, load_grants
 
 # Меньше этого удерживать бессмысленно: человек не успеет даже прочитать заявку.
 MIN_HOLD_MINUTES = 30
@@ -730,3 +730,26 @@ async def by_participant(
     return list(
         (await session.execute(query.order_by(Meeting.start_at).distinct())).scalars().all()
     )
+
+
+def visible_filter(user: User, grants: dict[str, Grant], visible_departments: set[int]) -> list:
+    """Условие видимости встреч в SQL: участник, владелец или область права."""
+    if not has_permission(grants, "meeting.read"):
+        return [Meeting.id.is_(None)]
+
+    same_org = Meeting.organization_id == user.organization_id
+    mine = or_(
+        Meeting.owner_id == user.id,
+        Meeting.id.in_(
+            select(MeetingParticipant.meeting_id).where(
+                MeetingParticipant.user_id == user.id
+            )
+        ),
+    )
+    scope = grants["meeting.read"].scope
+    if scope == Scope.ORGANIZATION:
+        return [same_org]
+    if scope == Scope.DEPARTMENT and visible_departments:
+        in_department = select(User.id).where(User.department_id.in_(visible_departments))
+        return [same_org, or_(mine, Meeting.owner_id.in_(in_department))]
+    return [same_org, mine]
