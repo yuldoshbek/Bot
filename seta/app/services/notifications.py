@@ -10,7 +10,7 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,23 @@ log = logging.getLogger("seta.notifications")
 
 MAX_ATTEMPTS = 3
 GROUP_THRESHOLD = 3  # начиная со скольких сообщений они объединяются в одно
+
+
+def _priority_rank():
+    """Порядок доставки: критичное первым.
+
+    Столбец priority строковый, и сортировка по нему давала обратный порядок
+    (NORMAL, LOW, CRITICAL по алфавиту) — критичное уходило последним.
+    """
+    return case(
+        {
+            NotificationPriority.CRITICAL: 0,
+            NotificationPriority.NORMAL: 1,
+            NotificationPriority.LOW: 2,
+        },
+        value=Notification.priority,
+        else_=3,
+    )
 
 
 async def enqueue(
@@ -67,17 +84,33 @@ async def enqueue(
     return created is not None
 
 
-async def pending_for_delivery(session: AsyncSession, limit: int = 200) -> list[Notification]:
-    rows = await session.execute(
+async def pending_for_delivery(
+    session: AsyncSession,
+    limit: int = 200,
+    organization_id: int | None = None,
+) -> list[Notification]:
+    """Готовые к отправке уведомления.
+
+    organization_id ограничивает выборку одной организацией. Проверочным
+    скриптам он обязателен: иначе прогон разберёт боевую очередь и пометит
+    настоящие уведомления доставленными, хотя никто их не получит.
+    """
+    query = (
         select(Notification)
         .where(
             Notification.status == NotificationStatus.PENDING,
             Notification.scheduled_at <= utcnow(),
             Notification.attempts < MAX_ATTEMPTS,
         )
-        .order_by(Notification.priority.desc(), Notification.scheduled_at)
+        .order_by(_priority_rank(), Notification.scheduled_at)
         .limit(limit)
     )
+    if organization_id is not None:
+        query = query.join(User, User.id == Notification.user_id).where(
+            User.organization_id == organization_id
+        )
+
+    rows = await session.execute(query)
     return list(rows.scalars().all())
 
 
@@ -147,12 +180,14 @@ def group_messages(items: list[Notification]) -> list[tuple[list[int], str]]:
     return result
 
 
-async def deliver_pending(session: AsyncSession, send) -> int:
+async def deliver_pending(
+    session: AsyncSession, send, organization_id: int | None = None
+) -> int:
     """Отправляет готовые уведомления. send(telegram_id, text) -> None.
 
     Возвращает количество доставленных сообщений.
     """
-    items = await pending_for_delivery(session)
+    items = await pending_for_delivery(session, organization_id=organization_id)
     if not items:
         return 0
 

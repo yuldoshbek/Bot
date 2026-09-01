@@ -270,15 +270,15 @@ async def main() -> None:
             session, creator=head, assignee=worker, title="Задача со сроком",
             due_at=utcnow() + timedelta(hours=47, minutes=30), priority=Priority.NORMAL,
         )
-        stats = await deadlines.process(session)
+        stats = await deadlines.process(session, organization_id=org.id)
         check(stats["reminded"] >= 1, "напоминание за 48 часов поставлено")
 
-        repeat = await deadlines.process(session)
+        repeat = await deadlines.process(session, organization_id=org.id)
         check(repeat["reminded"] == 0, "повторный проход не создаёт дублей")
 
         watched.due_at = utcnow() - timedelta(hours=2)
         await session.flush()
-        stats = await deadlines.process(session)
+        stats = await deadlines.process(session, organization_id=org.id)
         check(watched.status == TaskStatus.OVERDUE, "после срока статус стал «Просрочено»")
         check(
             await session.scalar(
@@ -292,7 +292,7 @@ async def main() -> None:
         print("\n8. Эскалация фильтрует, а не транслирует")
         watched.due_at = utcnow() - timedelta(days=1, hours=1)
         await session.flush()
-        await deadlines.process(session)
+        await deadlines.process(session, organization_id=org.id)
         check(
             await session.scalar(
                 select(func.count(Notification.id)).where(
@@ -305,7 +305,7 @@ async def main() -> None:
 
         watched.due_at = utcnow() - timedelta(days=3, hours=1)
         await session.flush()
-        await deadlines.process(session)
+        await deadlines.process(session, organization_id=org.id)
         check(
             await session.scalar(
                 select(func.count(Notification.id)).where(
@@ -331,7 +331,7 @@ async def main() -> None:
             due_at=utcnow() - timedelta(hours=1), priority=Priority.HIGH,
             personal_control=True,
         )
-        await deadlines.process(session)
+        await deadlines.process(session, organization_id=org.id)
         pc = (
             await session.execute(
                 select(Notification).where(
@@ -383,11 +383,20 @@ async def main() -> None:
         async def fake_send(telegram_id: int, text: str) -> None:
             sent_to.append((telegram_id, text))
 
-        delivered = await deliver_pending(session, fake_send)
+        delivered = await deliver_pending(session, fake_send, organization_id=org.id)
         check(delivered > 0, f"уведомления доставлены ({delivered})")
+        test_recipients = {
+            row[0]
+            for row in (
+                await session.execute(
+                    select(User.telegram_user_id).where(User.organization_id == org.id)
+                )
+            ).all()
+        }
         check(
-            all(tg >= base_tg for tg, _ in sent_to),
-            "сообщения ушли только тестовым получателям",
+            all(tg in test_recipients for tg, _ in sent_to),
+            "сообщения ушли только сотрудникам тестовой организации",
+            f"посторонние получатели: {[tg for tg, _ in sent_to if tg not in test_recipients]}",
         )
         left = await session.scalar(
             select(func.count(Notification.id)).where(
@@ -430,7 +439,15 @@ async def main() -> None:
     await cleanup()
     async with session_scope() as session:
         real_after = await session.scalar(select(func.count(User.id)))
-        tasks_left = await session.scalar(select(func.count(Task.id)))
+        tasks_left = await session.scalar(
+            select(func.count(Task.id)).where(
+                Task.organization_id.in_(
+                    select(Organization.id).where(
+                        Organization.name.like(f"{TEST_ORG_PREFIX}%")
+                    )
+                )
+            )
+        )
     check(real_after == real_before, "настоящие сотрудники не удалены", f"{real_before} → {real_after}")
     check(tasks_left == 0, "тестовые поручения убраны")
 

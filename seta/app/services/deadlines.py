@@ -52,17 +52,29 @@ PENDING_STATUSES = (
 )
 
 
-async def process(session: AsyncSession, now: datetime | None = None) -> dict[str, int]:
-    """Один проход по срокам. Возвращает счётчики для журнала работы."""
+async def process(
+    session: AsyncSession,
+    now: datetime | None = None,
+    organization_id: int | None = None,
+) -> dict[str, int]:
+    """Один проход по срокам. Возвращает счётчики для журнала работы.
+
+    organization_id ограничивает проход одной организацией. В бою не задаётся
+    (организация одна), но проверочным скриптам он обязателен: без него прогон
+    теста переведёт боевые поручения в «Просрочено» и разошлёт живым людям
+    настоящие уведомления.
+    """
     now = now or utcnow()
     stats = {"reminded": 0, "overdue": 0, "escalated": 0}
 
-    rows = await session.execute(
-        select(Task).where(
-            Task.status.in_(PENDING_STATUSES),
-            Task.due_at.isnot(None),
-        )
+    query = select(Task).where(
+        Task.status.in_(PENDING_STATUSES),
+        Task.due_at.isnot(None),
     )
+    if organization_id is not None:
+        query = query.where(Task.organization_id == organization_id)
+
+    rows = await session.execute(query)
     tasks = list(rows.scalars().all())
     if not tasks:
         return stats
