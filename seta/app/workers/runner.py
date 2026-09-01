@@ -6,7 +6,7 @@
 Три цикла с разной частотой:
   доставка  - каждые 3 секунды (цель по задержке очереди: не больше 5 секунд);
   сроки     - раз в минуту;
-  окна      - раз в минуту: снимает удержания, по которым не приняли решение.
+  встречи   - раз в минуту: снимает удержания без решения и зовёт отметиться.
 
 Оба защищены распределённой блокировкой в Redis: даже если запустить второй
 обработчик, одно напоминание уйдёт один раз.
@@ -16,7 +16,7 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
-from app.services import deadlines, meetings
+from app.services import attendance, deadlines, meetings
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
 
@@ -29,7 +29,7 @@ log = logging.getLogger("seta.worker")
 
 DELIVERY_INTERVAL = 3
 DEADLINE_INTERVAL = 60
-HOLD_INTERVAL = 60
+MEETING_INTERVAL = 60
 
 
 async def delivery_loop() -> None:
@@ -76,33 +76,35 @@ async def deadline_loop() -> None:
         await asyncio.sleep(DEADLINE_INTERVAL)
 
 
-async def hold_loop() -> None:
-    """Освобождение окон, удержанных под заявку, по которой не приняли решение.
+async def meeting_loop() -> None:
+    """Ежеминутный уход за встречами: освобождение окон и приглашение отметиться.
 
-    Опираться на то, что кто-то откроет календарь и «заодно» подчистит, нельзя:
-    окно должно вернуться в оборот само, даже если в системе неделю никого нет.
+    Оба дела опираются на время, а не на действие человека. Опираться на то,
+    что кто-то откроет календарь и «заодно» подчистит, нельзя: окно должно
+    вернуться в оборот, даже если в системе неделю никого нет.
     """
     while True:
         try:
-            await beat("worker:holds")
-            if await acquire_lock("meetings:holds", ttl_seconds=HOLD_INTERVAL * 2):
+            await beat("worker:meetings")
+            if await acquire_lock("meetings:upkeep", ttl_seconds=MEETING_INTERVAL * 2):
                 try:
                     async with session_scope() as session:
                         released = await meetings.expire_holds(session)
-                    if released:
-                        log.info("освобождено окон: %s", released)
+                        called = await attendance.open_checkins(session)
+                    if released or called:
+                        log.info("окон освобождено %s, позвано отметиться %s", released, called)
                 finally:
-                    await release_lock("meetings:holds")
+                    await release_lock("meetings:upkeep")
         except Exception as error:
-            log.exception("сбой освобождения окон")
-            await record_error(error, source="worker", context="освобождение окон")
-        await asyncio.sleep(HOLD_INTERVAL)
+            log.exception("сбой ухода за встречами")
+            await record_error(error, source="worker", context="уход за встречами")
+        await asyncio.sleep(MEETING_INTERVAL)
 
 
 async def main() -> None:
     log.info("Фоновый обработчик запущен")
     try:
-        await asyncio.gather(delivery_loop(), deadline_loop(), hold_loop())
+        await asyncio.gather(delivery_loop(), deadline_loop(), meeting_loop())
     finally:
         from app.bot.loader import bot
 

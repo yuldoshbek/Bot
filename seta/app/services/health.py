@@ -42,7 +42,7 @@ SERVICES = {
     "bot": "Бот",
     "worker:delivery": "Доставка уведомлений",
     "worker:deadlines": "Контроль сроков",
-    "worker:holds": "Освобождение окон",
+    "worker:meetings": "Уход за встречами",
 }
 
 

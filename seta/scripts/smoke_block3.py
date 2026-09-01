@@ -50,13 +50,14 @@ from app.models import (
 )
 from app.models.enums import (
     AbsenceKind,
+    AttendanceSource,
     Availability,
     NotificationPriority,
     ParticipantRole,
     RequestStatus,
     RoleCode,
 )
-from app.services import meetings, slots as slot_service
+from app.services import attendance, meetings, slots as slot_service
 from app.services.availability import set_state
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 
@@ -998,7 +999,223 @@ async def main() -> None:
         check(state == MeetingStatus.CANCELLED, "встреча отменена", f"состояние: {state}")
         check(letters == 2, "письмо каждому участнику ровно одно", f"писем: {letters}")
 
-    print("\n23. Уборка не трогает боевые данные")
+    print("\n23. Приглашение отметиться")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        org = await session.get(Organization, org_id)
+        helper = await person(session, org, "Ассистент", RoleCode.ASSISTANT, 940_002_001)
+        day = MONDAY + timedelta(days=28)
+
+        gathering = await busy(session, chief, at(day, 10), at(day, 11), "ТЕСТ явка")
+        for uid, role in (
+            (chief_id, ParticipantRole.ORGANIZER),
+            (worker_id, ParticipantRole.REQUIRED),
+        ):
+            session.add(MeetingParticipant(
+                meeting_id=gathering.id, user_id=uid, role=role, created_at=utcnow()
+            ))
+        await session.flush()
+        gathering_id = gathering.id
+
+        early = await attendance.open_checkins(session, now=at(day, 9))
+        check(early == 0, "за час до начала никого не зовут", f"писем: {early}")
+
+        called = await attendance.open_checkins(session, now=at(day, 9, 57))
+        check(called == 2, "за три минуты позвали обоих", f"писем: {called}")
+
+        again = await attendance.open_checkins(session, now=at(day, 9, 58))
+        check(again == 0, "повторный проход не зовёт второй раз", f"писем: {again}")
+
+    print("\n24. Отметка о присутствии")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        worker = await session.get(User, worker_id)
+        chief = await session.get(User, chief_id)
+        gathering = await session.get(Meeting, gathering_id)
+        day = MONDAY + timedelta(days=28)
+
+        too_early, why = await attendance.check_in(
+            session, meeting=gathering, user=worker, now=at(day, 9, 30)
+        )
+        check(not too_early, "заранее отметиться нельзя", why or "")
+
+        marked, why = await attendance.check_in(
+            session, meeting=gathering, user=worker, now=at(day, 9, 58)
+        )
+        check(marked, "в окне отметка принимается", why or "")
+
+        twice, why = await attendance.check_in(
+            session, meeting=gathering, user=worker, now=at(day, 9, 59)
+        )
+        check(not twice, "двойное нажатие второй записи не создаёт", why or "")
+        rows = await session.scalar(
+            select(func.count(MeetingAttendance.id)).where(
+                MeetingAttendance.meeting_id == gathering_id,
+                MeetingAttendance.user_id == worker_id,
+            )
+        )
+        check(rows == 1, "запись о явке ровно одна", f"их {rows}")
+
+        late_ok, why = await attendance.check_in(
+            session, meeting=gathering, user=chief, now=at(day, 10, 7)
+        )
+        check(late_ok, "опоздавший отмечается", why or "")
+        late = await session.scalar(
+            select(MeetingAttendance.late_minutes).where(
+                MeetingAttendance.meeting_id == gathering_id,
+                MeetingAttendance.user_id == chief_id,
+            )
+        )
+        check(late == 7, "и опоздание записано в минутах", f"записано: {late}")
+
+    print("\n25. Правка явки после встречи")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        helper = (
+            await session.execute(
+                select(User).where(User.telegram_user_id == 940_002_001)
+            )
+        ).scalar_one()
+        gathering = await session.get(Meeting, gathering_id)
+        day = MONDAY + timedelta(days=28)
+
+        late_self, why = await attendance.check_in(
+            session, meeting=gathering, user=worker, now=at(day, 12)
+        )
+        check(not late_self, "после окончания сам себя не отметить", why or "")
+
+        denied, why = await attendance.correct(
+            session, meeting=gathering, user_id=chief_id, actor=worker, present=False
+        )
+        check(not denied, "сотрудник чужую явку не правит", why or "")
+
+        fixed, why = await attendance.correct(
+            session, meeting=gathering, user_id=worker_id, actor=helper,
+            present=False, now=at(day, 12),
+        )
+        check(fixed, "ассистент правит явку и после встречи", why or "")
+        source = await session.scalar(
+            select(MeetingAttendance.source).where(
+                MeetingAttendance.meeting_id == gathering_id,
+                MeetingAttendance.user_id == worker_id,
+            )
+        )
+        check(source == AttendanceSource.ASSISTANT, "и видно, что правил ассистент", f"{source}")
+
+        sheet = await attendance.roll_call(session, gathering)
+        check(len(sheet) == 2, "перекличка охватывает всех участников", f"строк {len(sheet)}")
+        check(
+            any(u.id == chief_id and was and mins == 7 for u, was, mins in sheet),
+            "в перекличке видно опоздание",
+        )
+        check(
+            any(u.id == worker_id and not was for u, was, _ in sheet),
+            "и исправленное отсутствие",
+        )
+
+    print("\n26. Оценка встречи")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        helper = (
+            await session.execute(
+                select(User).where(User.telegram_user_id == 940_002_001)
+            )
+        ).scalar_one()
+        gathering = await session.get(Meeting, gathering_id)
+        day = MONDAY + timedelta(days=28)
+
+        too_soon, why = await attendance.rate(
+            session, meeting=gathering, actor=chief, score=1, now=at(day, 10, 30)
+        )
+        check(not too_soon, "недошедшую встречу не оценить", why or "")
+
+        nonsense, why = await attendance.rate(
+            session, meeting=gathering, actor=chief, score=5, now=at(day, 12)
+        )
+        check(not nonsense, "оценка бывает только 1, 0 или -1", why or "")
+
+        not_mine, why = await attendance.rate(
+            session, meeting=gathering, actor=worker, score=1, now=at(day, 12)
+        )
+        check(not not_mine, "сотрудник встречу не оценивает", why or "")
+
+        rated, why = await attendance.rate(
+            session, meeting=gathering, actor=chief, score=-1,
+            comment="Не подготовились", voice_file_id="ТЕСТ-голос",
+            now=at(day, 12),
+        )
+        check(rated, "руководитель ставит оценку", why or "")
+
+        changed, why = await attendance.rate(
+            session, meeting=gathering, actor=chief, score=1, now=at(day, 12, 5)
+        )
+        check(changed, "и может передумать", why or "")
+        rows = await session.scalar(
+            select(func.count(MeetingRating.id)).where(
+                MeetingRating.meeting_id == gathering_id
+            )
+        )
+        check(rows == 1, "оценка при этом остаётся одна", f"их {rows}")
+        stored = (
+            await session.execute(
+                select(MeetingRating).where(MeetingRating.meeting_id == gathering_id)
+            )
+        ).scalar_one()
+        check(stored.score == 1, "с новым значением", f"{stored.score}")
+        check(stored.voice_file_id == "ТЕСТ-голос", "голосовой комментарий сохранён")
+
+    print("\n27. Кто видит оценки")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        helper = (
+            await session.execute(
+                select(User).where(User.telegram_user_id == 940_002_001)
+            )
+        ).scalar_one()
+        gathering = await session.get(Meeting, gathering_id)
+
+        check(
+            await attendance.rating_for(session, meeting=gathering, viewer=chief) is not None,
+            "руководитель свою оценку видит",
+        )
+        check(
+            await attendance.rating_for(session, meeting=gathering, viewer=helper) is not None,
+            "ассистент тоже",
+        )
+        check(
+            await attendance.rating_for(session, meeting=gathering, viewer=worker) is None,
+            "а участник встречи — нет",
+        )
+        stranger_org = (
+            await session.execute(
+                select(Organization.id).where(Organization.name == f"{TEST_ORG_PREFIX}Чужая")
+            )
+        ).scalar_one()
+        outsider = (
+            await session.execute(
+                select(User).where(User.organization_id == stranger_org).limit(1)
+            )
+        ).scalar_one()
+        check(
+            await attendance.rating_for(session, meeting=gathering, viewer=outsider) is None,
+            "и человек из другой организации — тем более",
+        )
+
+        average, count = await attendance.average_score(
+            session, organization_id=org_id, since=at(MONDAY, 0),
+        )
+        check(count == 1, "в обезличенной выборке оценка учтена", f"их {count}")
+        check(average == 1.0, "со своим значением", f"{average}")
+
+    print("\n28. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

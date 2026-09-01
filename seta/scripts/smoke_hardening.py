@@ -515,7 +515,7 @@ async def main() -> None:
     )
     check(
         set(status.services) == {
-            "bot", "worker:delivery", "worker:deadlines", "worker:holds"
+            "bot", "worker:delivery", "worker:deadlines", "worker:meetings"
         },
         "состояние следит за всеми четырьмя службами",
         f"следит за: {sorted(status.services)}",
