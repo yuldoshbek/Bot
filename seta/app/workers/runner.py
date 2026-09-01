@@ -3,9 +3,10 @@
 Отдельный процесс, а не поток внутри бота: бот должен отвечать Telegram за
 секунды и не зависеть от того, сколько сейчас рассылается сообщений.
 
-Два цикла с разной частотой:
+Три цикла с разной частотой:
   доставка  - каждые 3 секунды (цель по задержке очереди: не больше 5 секунд);
-  сроки     - раз в минуту.
+  сроки     - раз в минуту;
+  окна      - раз в минуту: снимает удержания, по которым не приняли решение.
 
 Оба защищены распределённой блокировкой в Redis: даже если запустить второй
 обработчик, одно напоминание уйдёт один раз.
@@ -15,7 +16,7 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
-from app.services import deadlines
+from app.services import deadlines, meetings
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
 
@@ -28,6 +29,7 @@ log = logging.getLogger("seta.worker")
 
 DELIVERY_INTERVAL = 3
 DEADLINE_INTERVAL = 60
+HOLD_INTERVAL = 60
 
 
 async def delivery_loop() -> None:
@@ -74,10 +76,33 @@ async def deadline_loop() -> None:
         await asyncio.sleep(DEADLINE_INTERVAL)
 
 
+async def hold_loop() -> None:
+    """Освобождение окон, удержанных под заявку, по которой не приняли решение.
+
+    Опираться на то, что кто-то откроет календарь и «заодно» подчистит, нельзя:
+    окно должно вернуться в оборот само, даже если в системе неделю никого нет.
+    """
+    while True:
+        try:
+            await beat("worker:holds")
+            if await acquire_lock("meetings:holds", ttl_seconds=HOLD_INTERVAL * 2):
+                try:
+                    async with session_scope() as session:
+                        released = await meetings.expire_holds(session)
+                    if released:
+                        log.info("освобождено окон: %s", released)
+                finally:
+                    await release_lock("meetings:holds")
+        except Exception as error:
+            log.exception("сбой освобождения окон")
+            await record_error(error, source="worker", context="освобождение окон")
+        await asyncio.sleep(HOLD_INTERVAL)
+
+
 async def main() -> None:
     log.info("Фоновый обработчик запущен")
     try:
-        await asyncio.gather(delivery_loop(), deadline_loop())
+        await asyncio.gather(delivery_loop(), deadline_loop(), hold_loop())
     finally:
         from app.bot.loader import bot
 

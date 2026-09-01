@@ -48,8 +48,8 @@ from app.models import (
     UserStatus,
     WorkingHours,
 )
-from app.models.enums import AbsenceKind, Availability, RoleCode
-from app.services import slots as slot_service
+from app.models.enums import AbsenceKind, Availability, RequestStatus, RoleCode
+from app.services import meetings, slots as slot_service
 from app.services.availability import set_state
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 
@@ -148,6 +148,23 @@ async def busy(session, owner, start: datetime, end: datetime, title="Занят
     session.add(meeting)
     await session.flush()
     return meeting
+
+
+async def test_people(session) -> tuple[int, int, int]:
+    """Организация, руководитель и сотрудник тестовой площадки в новой сессии."""
+    org_id = (
+        await session.execute(
+            select(Organization.id).where(Organization.name == f"{TEST_ORG_PREFIX}Календарь")
+        )
+    ).scalar_one()
+    ids = [
+        row[0] for row in (
+            await session.execute(
+                select(User.id).where(User.organization_id == org_id).order_by(User.id).limit(2)
+            )
+        ).all()
+    ]
+    return org_id, ids[0], ids[1]
 
 
 async def main() -> None:
@@ -464,7 +481,221 @@ async def main() -> None:
             check(True, "пересекающаяся встреча отвергается базой")
             await session.rollback()
 
-    print("\n13. Уборка не трогает боевые данные")
+    print("\n13. Заявка занимает окно немедленно")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        day = MONDAY + timedelta(days=21)
+
+        before = await session.scalar(select(func.count(SlotHold.id)))
+        outcome = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(day, 10), duration_minutes=30, title="ТЕСТ обсуждение",
+        )
+        check(outcome.ok, "заявка создана", outcome.reason or "")
+        check(
+            await session.scalar(select(func.count(SlotHold.id))) == before + 1,
+            "удержание появилось вместе с заявкой",
+        )
+        check(
+            not await slot_service.is_free(
+                session, owner=chief, start_at=at(day, 10), end_at=at(day, 10, 30)
+            ),
+            "окно сразу видно занятым, решения ещё нет",
+        )
+        check(
+            outcome.request.status == RequestStatus.NEW,
+            "заявка ждёт решения",
+        )
+        owner_note = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key == f"meeting_request:{outcome.request.id}:new"
+            )
+        )
+        check(owner_note == 1, "руководитель уведомлён один раз", f"писем: {owner_note}")
+        request_id = outcome.request.id
+
+    print("\n14. Отказы")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        day = MONDAY + timedelta(days=21)
+
+        taken = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(day, 10), duration_minutes=30, title="ТЕСТ то же окно",
+        )
+        check(not taken.ok, "второе окно поверх занятого не берётся")
+        check(bool(taken.alternatives), "и в отказе есть варианты", "список пуст")
+        check(
+            all(
+                not s.overlaps(at(day, 10), at(day, 10, 30))
+                for s in taken.alternatives
+            ),
+            "варианты не повторяют занятое время",
+        )
+
+        past = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(MONDAY - timedelta(days=30), 10), duration_minutes=30,
+            title="ТЕСТ прошлое",
+        )
+        check(not past.ok, "на прошедшее время заявку не принять")
+
+        other_org = Organization(name=f"{TEST_ORG_PREFIX}Чужая", timezone="Asia/Tashkent")
+        session.add(other_org)
+        await session.flush()
+        stranger = await person(session, other_org, "Чужой", RoleCode.EMPLOYEE, 940_000_099)
+        cross = await meetings.create_request(
+            session, initiator=stranger, owner=chief,
+            start_at=at(day, 16), duration_minutes=30, title="ТЕСТ чужая организация",
+        )
+        check(not cross.ok, "заявка через границу организации не проходит")
+
+    print("\n15. Десять заявок на одно окно одновременно")
+    day = MONDAY + timedelta(days=22)
+
+    barrier = asyncio.Barrier(10)
+
+    async def attempt(person_id: int) -> tuple[bool, str | None]:
+        async with session_scope() as s:
+            chief_id = (
+                await s.execute(
+                    select(User.id).join(Organization, Organization.id == User.organization_id)
+                    .where(Organization.name == f"{TEST_ORG_PREFIX}Календарь")
+                    .order_by(User.id).limit(1)
+                )
+            ).scalar_one()
+            initiator = await s.get(User, person_id)
+            owner = await s.get(User, chief_id)
+            # Все десять подходят к вставке одновременно. Без этого gather
+            # успевал бы выполнить их по очереди, и запрет в базе — то, ради
+            # чего всё затевалось, — ни разу не сработал бы.
+            await barrier.wait()
+            result = await meetings.create_request(
+                s, initiator=initiator, owner=owner,
+                start_at=at(day, 11), duration_minutes=30, title="ТЕСТ гонка",
+            )
+            return result.ok, result.reason
+
+    async with session_scope() as session:
+        org = (
+            await session.execute(
+                select(Organization).where(Organization.name == f"{TEST_ORG_PREFIX}Календарь")
+            )
+        ).scalar_one()
+        racers = [
+            (await person(session, org, f"Гонщик {i}", RoleCode.EMPLOYEE, 940_001_000 + i)).id
+            for i in range(10)
+        ]
+
+    results = await asyncio.gather(*(attempt(pid) for pid in racers), return_exceptions=True)
+    crashed = [r for r in results if isinstance(r, BaseException)]
+    won = [r for r in results if not isinstance(r, BaseException) and r[0]]
+    reasons = [r[1] for r in results if not isinstance(r, BaseException) and not r[0]]
+    check(not crashed, "ни одна заявка не упала с ошибкой", f"{crashed[:1]}")
+    check(len(won) == 1, "окно досталось ровно одному", f"победителей: {len(won)}")
+    check(
+        any("только что" in (r or "") for r in reasons),
+        "отсеял именно запрет в базе, а не предварительная проверка",
+        f"причины: {sorted(set(reasons))}",
+    )
+
+    async with session_scope() as session:
+        holds = await session.scalar(
+            select(func.count(SlotHold.id)).where(
+                SlotHold.start_at == at(day, 11), SlotHold.released_at.is_(None)
+            )
+        )
+        requests = await session.scalar(
+            select(func.count(MeetingRequest.id)).where(MeetingRequest.start_at == at(day, 11))
+        )
+        check(holds == 1, "действующее удержание одно", f"их {holds}")
+        check(requests == 1, "и заявка тоже одна — проигравшие не оставили следов", f"их {requests}")
+
+    print("\n16. Отклонение освобождает окно сразу")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        request = await session.get(MeetingRequest, request_id)
+
+        done = await meetings.decline(session, request=request, actor=chief, reason="Занят")
+        check(done, "отклонение принято")
+        check(request.status == RequestStatus.DECLINED, "заявка отклонена")
+        released = await session.scalar(
+            select(func.count(SlotHold.id)).where(
+                SlotHold.request_id == request_id, SlotHold.released_at.is_(None)
+            )
+        )
+        check(released == 0, "удержание снято", f"осталось: {released}")
+        check(
+            await slot_service.is_free(
+                session, owner=chief,
+                start_at=request.start_at, end_at=request.end_at,
+            ),
+            "окно снова свободно",
+        )
+        told = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key == f"meeting_request:{request_id}:declined"
+            )
+        )
+        check(told == 1, "инициатор узнал об отказе", f"писем: {told}")
+
+        again = await meetings.decline(session, request=request, actor=chief, reason="Ещё раз")
+        check(not again, "повторное отклонение ничего не меняет")
+        told_again = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key == f"meeting_request:{request_id}:declined"
+            )
+        )
+        check(told_again == 1, "и второго письма инициатору не уходит", f"писем: {told_again}")
+
+    print("\n17. Просроченное удержание освобождается само")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        day = MONDAY + timedelta(days=23)
+
+        outcome = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(day, 15), duration_minutes=30, title="ТЕСТ без ответа",
+        )
+        check(outcome.ok, "заявка создана", outcome.reason or "")
+        stale_id = outcome.request.id
+        check(
+            outcome.hold.expires_at <= at(day, 15),
+            "удержание не переживает само окно",
+        )
+
+        # Ничего не решили — срок вышел.
+        outcome.hold.expires_at = utcnow() - timedelta(minutes=1)
+        await session.flush()
+
+        released = await meetings.expire_holds(session)
+        check(released >= 1, "обработчик снял удержание", f"снято: {released}")
+        stale = await session.get(MeetingRequest, stale_id)
+        check(stale.status == RequestStatus.EXPIRED, "заявка помечена истёкшей")
+        check(
+            await slot_service.is_free(
+                session, owner=chief, start_at=at(day, 15), end_at=at(day, 15, 30)
+            ),
+            "окно вернулось в оборот",
+        )
+        told = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key == f"meeting_request:{stale_id}:expired"
+            )
+        )
+        check(told == 1, "инициатор узнал, что ответа не было", f"писем: {told}")
+
+        second_pass = await meetings.expire_holds(session)
+        check(second_pass == 0, "второй проход не находит уже снятых")
+
+    print("\n18. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(
