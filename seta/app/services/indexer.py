@@ -26,6 +26,17 @@ log = logging.getLogger("seta.indexer")
 # не встретилась там ни разу, поиск по документу всё равно не тот инструмент.
 MAX_TEXT_CHARS = 500_000
 
+# Управляющие символы, которые база не примет. Нулевой байт в тексте — обычное
+# дело: достаточно, чтобы двоичный файл прислали под именем «отчёт.txt».
+# Табуляцию, перевод строки и возврат каретки оставляем.
+_CONTROL = {code: None for code in range(32) if code not in (9, 10, 13)}
+_CONTROL[127] = None
+
+
+def clean(text: str) -> str:
+    """Убирает управляющие символы: PostgreSQL отвергает строку с 0x00 целиком."""
+    return (text or "").translate(_CONTROL)
+
 
 def extract(data: bytes, file_name: str) -> tuple[str, int]:
     """Достаёт текст из файла. Возвращает (текст, число страниц или листов).
@@ -92,7 +103,7 @@ async def save_text(
     Вектор хранится, а не считается на каждый запрос: морфология по документу
     на двести страниц — заметная работа, и делать её при каждом поиске незачем.
     """
-    content = (content or "").strip()[:MAX_TEXT_CHARS]
+    content = clean(content).strip()[:MAX_TEXT_CHARS]
     existing = (
         await session.execute(
             select(DocumentText).where(DocumentText.document_id == document.id)
@@ -136,14 +147,28 @@ async def index_pending(session: AsyncSession, download, limit: int = 5) -> dict
             log.warning("не разобран документ %s: %s", document.id, error)
             continue
 
-        if not (content or "").strip():
+        if not clean(content).strip():
             # Скан без текстового слоя. Не ошибка: документ цел, просто
             # искать по нему можно только по имени.
             document.index_status = IndexStatus.EMPTY
             stats["empty"] += 1
             continue
 
-        await save_text(session, document=document, content=content, pages=pages)
+        # Запись под точкой сохранения: отказ базы на одном документе не должен
+        # обрывать проход и уж тем более откатывать разобранные до него.
+        # Без этого проход падал бы на первом же файле с нулевым байтом внутри
+        # и повторял бы падение каждую минуту, не двигаясь дальше.
+        savepoint = await session.begin_nested()
+        try:
+            await save_text(session, document=document, content=content, pages=pages)
+        except Exception as error:  # noqa: BLE001 — отказ записи это тоже состояние
+            await savepoint.rollback()
+            document.index_status = IndexStatus.FAILED
+            document.index_error = f"{type(error).__name__}: {error}"[:300]
+            stats["failed"] += 1
+            log.warning("не записан текст документа %s: %s", document.id, error)
+            continue
+
         document.index_status = IndexStatus.DONE
         document.index_error = None
         stats["done"] += 1

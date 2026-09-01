@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
@@ -799,6 +799,10 @@ async def main() -> None:
             ]),
             "contract.pdf": tiny_pdf("Dogovor postavki oborudovaniya"),
             "битый.pdf": b"not a pdf at all",
+            # Двоичный файл под именем текстового: так выглядит обычная
+            # ошибка человека, а внутри — нулевые байты, которых база
+            # не принимает вовсе.
+            "двоичный.txt": tiny_docx(["не текст"]),
         }
         stored = {}
         for name, data in files.items():
@@ -814,7 +818,9 @@ async def main() -> None:
             return files[file_id.removeprefix("id-")]
 
         stats = await indexer.index_pending(session, fake_download, limit=50)
-        check(stats["done"] == 4, "разобрано четыре документа", f"{stats}")
+        # Пять: четыре читаемых формата плюс двоичный файл, из которого
+        # после очистки остаётся мусорный, но безопасный текст.
+        check(stats["done"] == 5, "разобрано пять документов", f"{stats}")
 
         # В очереди лежат и документы прошлых разделов, поэтому общий счёт
         # сбоев ничего не сказал бы. Спрашиваем о судьбе именно наших файлов.
@@ -861,6 +867,25 @@ async def main() -> None:
             "12 штук" in table_text,
             "таблицы из docx тоже попадают в текст",
             table_text[:80],
+        )
+
+        # Нулевой байт внутри текста PostgreSQL отвергает вместе со всей
+        # строкой. Проверяем, что это состояние одного документа, а не обрыв
+        # прохода: соседние файлы обязаны быть разобраны.
+        binary = await session.get(Document, stored["двоичный.txt"])
+        check(
+            binary.index_status in (IndexStatus.DONE, IndexStatus.EMPTY, IndexStatus.FAILED),
+            "двоичный файл под именем текстового получил состояние, а не обрушил проход",
+            binary.index_status,
+        )
+        stored_text = await session.scalar(
+            select(DocumentText.content).where(
+                DocumentText.document_id == stored["двоичный.txt"]
+            )
+        )
+        check(
+            chr(0) not in (stored_text or ""),
+            "и в базу не попало ни одного нулевого байта",
         )
 
         again = await indexer.index_pending(session, fake_download, limit=20)
@@ -1233,7 +1258,133 @@ async def main() -> None:
         )
         check(wrong is None, "неизвестный вид выгрузки отклоняется", why or "")
 
-    print("\n17. Уборка не трогает боевые данные")
+    print("\n17. Готовность блока: совещание целиком")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker, head = who["руководитель"], who["сотрудник"], who["начальник"]
+        day = MONDAY + timedelta(days=14)
+
+        planned = Meeting(
+            organization_id=chief.organization_id, owner_id=chief.id,
+            title="ТЕСТ итоговое совещание по кварталу",
+            start_at=at(day, 10), end_at=at(day, 11),
+            status=MeetingStatus.CONFIRMED, created_by=chief.id,
+        )
+        session.add(planned)
+        await session.flush()
+        for uid in (chief.id, worker.id, head.id):
+            session.add(MeetingParticipant(
+                meeting_id=planned.id, user_id=uid,
+                role=ParticipantRole.REQUIRED, created_at=utcnow(),
+            ))
+        await session.flush()
+
+        # Документ к совещанию, открытый всем участникам.
+        body = tiny_docx([
+            "Отчёт за квартал",
+            "Отгрузка задержана из-за нехватки складских мест",
+            "Предложено арендовать дополнительный ангар",
+        ])
+        attached = await docs.store(
+            session, uploader=worker, file_id="id-квартал", file_unique_id="u-квартал",
+            file_name="отчёт-квартал.docx", size_bytes=len(body),
+            meeting=planned, scope=DocumentScope.PARTICIPANTS,
+        )
+        check(attached.ok, "документ приложен к совещанию", attached.reason or "")
+
+        # В очереди остались документы прошлых разделов; поддельный загрузчик
+        # их не знает. Уводим их из очереди, чтобы проверка говорила именно
+        # о нашем документе, а не о случайном соседе.
+        await session.execute(
+            update(Document)
+            .where(
+                Document.index_status == IndexStatus.PENDING,
+                Document.id != attached.document.id,
+            )
+            .values(index_status=IndexStatus.UNSUPPORTED)
+        )
+        await session.flush()
+
+        async def download(file_id: str) -> bytes:
+            return body
+
+        await indexer.index_pending(session, download, limit=5)
+        check(
+            (await session.get(Document, attached.document.id)).index_status == IndexStatus.DONE,
+            "текст документа извлечён",
+        )
+
+        finished = await meeting_service.finish(
+            session, meeting=planned, actor=chief, now=at(day, 11, 5)
+        )
+        check(finished.ok, "совещание завершено", finished.reason or "")
+
+        # Три решения и три поручения — то, ради чего блок и делался.
+        subjects = [
+            ("ТЕСТ арендовать ангар под сезонный запас", worker),
+            ("ТЕСТ пересмотреть график отгрузок", head),
+            ("ТЕСТ согласовать бюджет аренды", worker),
+        ]
+        made_decisions = []
+        for title, responsible in subjects:
+            outcome = await registry.create(
+                session, actor=chief, title=title, meeting=planned,
+                responsible=responsible, due_date=at(day + timedelta(days=7), 18),
+            )
+            check(outcome.ok, f"решение «{title[:28]}…» внесено", outcome.reason or "")
+            made_decisions.append(outcome.item)
+
+        for decision, (title, responsible) in zip(made_decisions, subjects):
+            task = await task_service.create_task(
+                session, creator=chief, assignee=responsible,
+                title=title.replace("ТЕСТ ", "ТЕСТ выполнить: "),
+                due_at=at(day + timedelta(days=7), 18),
+                meeting_id=planned.id, decision_id=decision.id,
+            )
+            check(task.due_at is not None, "у поручения есть срок")
+            check(task.assignee_id == responsible.id, "и ответственный")
+
+        counted = await registry.meeting_outcome(session, planned)
+        check(counted == (3, 3), "три решения и три поручения зафиксированы", f"{counted}")
+
+        with_due = await session.scalar(
+            select(func.count(Decision.id)).where(
+                Decision.meeting_id == planned.id,
+                Decision.responsible_id.is_not(None),
+                Decision.due_date.is_not(None),
+            )
+        )
+        check(with_due == 3, "у каждого решения есть ответственный и срок", f"их {with_due}")
+
+        # И документ находится по фразе из его текста — участником встречи.
+        found = await search.search(
+            session, user=head, grants=await load_grants(session, head),
+            query="нехватка складских мест",
+        )
+        check(
+            any(h.id == attached.document.id for h in found.documents),
+            "участник находит документ по фразе из текста",
+            f"{[h.title for h in found.documents]}",
+        )
+        check(
+            any(h.id == planned.id for h in found.meetings)
+            or bool(found.decisions) or bool(found.tasks) or bool(found.documents),
+            "поиск отвечает по нескольким разделам сразу",
+        )
+
+        # А тот, кого на совещании не было, — не находит.
+        helper_user = who["ассистент"]
+        hidden = await search.search(
+            session, user=helper_user, grants=await load_grants(session, helper_user),
+            query="нехватка складских мест",
+        )
+        check(
+            not any(h.id == attached.document.id for h in hidden.documents),
+            "и не находит тот, кого на совещании не было",
+            f"{[h.title for h in hidden.documents]}",
+        )
+
+    print("\n18. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

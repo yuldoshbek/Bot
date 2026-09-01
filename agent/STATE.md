@@ -2,7 +2,7 @@
 
 **Обновлено:** 1 сентября 2026 (день)
 **Блоки:** 1 и 2 из 6 завершены, блок укрепления выполнен,
-закрыт блок 3: календарь и встречи
+закрыт блок 4: встреча → решение → документ
 **Бот:** @Uzcosmos_meet_bot, режим long polling
 **Следующий:** блок 3 — календарь и встречи
 
@@ -104,10 +104,12 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block3.py    # 156 сценариев
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/smoke_block4.py    # 160 сценариев
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/stress_test.py    # 26 проверок на прочность
 ```
 
-Везде ожидается `Ошибок: 0`. Итого 338 проверок. Прогонять все пять перед началом нового блока.
+Везде ожидается `Ошибок: 0`. Итого 516 проверок. Прогонять все шесть перед началом нового блока.
 
 ### Состояние системы
 

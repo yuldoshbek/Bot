@@ -9,6 +9,7 @@ middleware и настоящую базу. Наружу ничего не ухо
 
   - одна и та же кнопка нажата десять раз подряд;
   - десять человек одновременно берут одно свободное окно;
+  - поиск с мусором на входе и подстановкой чужих идентификаторов;
   - десять нажатий одновременно (гонка за один объект);
   - чужой человек жмёт кнопки чужого поручения;
   - подставленный чужой идентификатор в callback;
@@ -37,12 +38,19 @@ from aiogram.methods import TelegramMethod
 from aiogram.types import Update
 from sqlalchemy import delete, func, select
 
-from app.bot.handlers import admin, availability, meetings, menu, start, tasks
+from app.bot.handlers import (
+    admin, availability, documents, meetings, menu, registry, start, tasks,
+)
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
 from app.models import (
     AuditLog,
+    Decision,
+    DecisionStatus,
+    Document,
+    DocumentScope,
+    DocumentView,
     Meeting,
     MeetingAttendance,
     MeetingParticipant,
@@ -188,7 +196,7 @@ def make_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
-    for module in (start, availability, admin, tasks, meetings, menu):
+    for module in (start, availability, admin, tasks, meetings, registry, documents, menu):
         dp.include_router(module.router)
     return dp
 
@@ -226,6 +234,30 @@ def contact_update(bot: Bot, telegram_id: int, phone: str) -> Update:
                 "chat": {"id": telegram_id, "type": "private"},
                 "from": _user_payload(telegram_id, f"user{telegram_id}"),
                 "contact": {"phone_number": phone, "first_name": "Тест", "user_id": telegram_id},
+            },
+        },
+        context={"bot": bot},
+    )
+
+
+def document_update(bot: Bot, telegram_id: int, file_name: str, size: int) -> Update:
+    global _update_id
+    _update_id += 1
+    return Update.model_validate(
+        {
+            "update_id": _update_id,
+            "message": {
+                "message_id": _update_id,
+                "date": int(datetime.now(tz=timezone.utc).timestamp()),
+                "chat": {"id": telegram_id, "type": "private"},
+                "from": _user_payload(telegram_id, f"user{telegram_id}"),
+                "document": {
+                    "file_id": f"stress-{_update_id}",
+                    "file_unique_id": f"su-{_update_id}",
+                    "file_name": file_name,
+                    "file_size": size,
+                    "mime_type": "application/octet-stream",
+                },
             },
         },
         context={"bot": bot},
@@ -308,6 +340,21 @@ async def cleanup() -> None:
             # Встречи держат ссылки на людей из нескольких колонок сразу
             # (владелец, автор, от чьего имени), поэтому убираются целиком
             # по организации, а не по одной из этих ссылок.
+            doc_ids = [
+                row[0] for row in (
+                    await session.execute(
+                        select(Document.id).where(Document.organization_id.in_(org_ids or [0]))
+                    )
+                ).all()
+            ]
+            if doc_ids:
+                await session.execute(
+                    delete(DocumentView).where(DocumentView.document_id.in_(doc_ids))
+                )
+                await session.execute(delete(Document).where(Document.id.in_(doc_ids)))
+            await session.execute(
+                delete(Decision).where(Decision.organization_id.in_(org_ids or [0]))
+            )
             meeting_ids = [
                 row[0] for row in (
                     await session.execute(
@@ -757,7 +804,121 @@ async def main() -> None:
         "; ".join(net.errors[before:][:3]),
     )
 
-    print("\n18. Ответы бота и отзывчивость")
+    print("\n19. Поиск: десять запросов и мусор на входе")
+    errors = [await hit(text_update(bot, TG["worker"], "🔎 Поиск")) for _ in range(10)]
+    check(not any(errors), "экран поиска выдержал десять открытий",
+          str(next((e for e in errors if e), "")))
+
+    junk_queries = [
+        "'; DROP TABLE documents; --",
+        "<script>alert(1)</script>",
+        "ы" * 5000,
+        "🙂🙂🙂",
+        "%",
+        "_",
+        "\\",
+        "тест",
+    ]
+    before = len(net.errors)
+    for query in junk_queries:
+        await hit(text_update(bot, TG["worker"], "🔎 Поиск"))
+        await hit(text_update(bot, TG["worker"], query))
+    check(
+        len(net.errors) == before,
+        "мусорный запрос не сломал ни один ответ",
+        "; ".join(net.errors[before:][:3]),
+    )
+    async with session_scope() as session:
+        alive = await session.scalar(select(func.count(Document.id)))
+    check(alive is not None, "таблица документов на месте после запроса с DROP TABLE")
+
+    print("\n20. Документы: приём и подставленные идентификаторы")
+    errors = [
+        await hit(document_update(bot, TG["worker"], f"отчёт-{i}.pdf", 100 * 1024))
+        for i in range(10)
+    ]
+    check(not any(errors), "десять файлов подряд приняты без падений",
+          str(next((e for e in errors if e), "")))
+    async with session_scope() as session:
+        stored = await session.scalar(
+            select(func.count(Document.id)).where(Document.uploaded_by == ids["worker"])
+        )
+    check(stored == 10, "и все десять записаны", f"их {stored}")
+
+    error = await hit(document_update(bot, TG["worker"], "вирус.exe", 1024))
+    check(not error, "исполняемый файл не уронил обработчик", error or "")
+    async with session_scope() as session:
+        after_exe = await session.scalar(
+            select(func.count(Document.id)).where(Document.uploaded_by == ids["worker"])
+        )
+    check(after_exe == 10, "и не записался", f"их {after_exe}")
+
+    async with session_scope() as session:
+        someone_else = await session.scalar(
+            select(Document.id).where(Document.uploaded_by == ids["worker"]).limit(1)
+        )
+    probes = [
+        f"dc:card:{someone_else}", f"dc:get:{someone_else}", f"dc:log:{someone_else}",
+        f"dc:sc:{someone_else}:ORGANIZATION", "dc:card:999999999", "dc:get:abc",
+        "dc:sc:1:НЕПОНЯТНО", "dn:card:999999999", "dn:done:abc", "dn:kill:0",
+        "ex:секреты", "ex:tasks",
+    ]
+    errors = [await hit(callback_update(bot, TG["stranger"], probe)) for probe in probes]
+    check(not any(errors), "чужие и мусорные идентификаторы обработаны без падений",
+          str(next((e for e in errors if e), "")))
+
+    async with session_scope() as session:
+        scope_now = await session.scalar(
+            select(Document.scope).where(Document.id == someone_else)
+        )
+    check(
+        scope_now == DocumentScope.PRIVATE,
+        "чужой не смог открыть чужой документ всей организации",
+        str(scope_now),
+    )
+    async with session_scope() as session:
+        views = await session.scalar(
+            select(func.count(DocumentView.id)).where(DocumentView.document_id == someone_else)
+        )
+    check(views == 0, "и не получил его — журнал открытий пуст", f"записей {views}")
+
+    print("\n21. Реестр решений и выгрузка под нагрузкой")
+    errors = [await hit(text_update(bot, TG["chief"], "📌 Решения")) for _ in range(10)]
+    check(not any(errors), "реестр выдержал десять открытий",
+          str(next((e for e in errors if e), "")))
+
+    await hit(callback_update(bot, TG["chief"], "dn:new"))
+    error = await hit(text_update(bot, TG["chief"], "ТЕСТ решение из нагрузочной проверки"))
+    check(not error, "решение внесено через бота", error or "")
+    async with session_scope() as session:
+        made = await session.scalar(
+            select(func.count(Decision.id)).where(Decision.author_id == ids["chief"])
+        )
+    check(made >= 1, "и записано в реестр", f"их {made}")
+
+    async with session_scope() as session:
+        decision_id = await session.scalar(
+            select(Decision.id).where(Decision.author_id == ids["chief"]).limit(1)
+        )
+    errors = [
+        await hit(callback_update(bot, TG["chief"], f"dn:done:{decision_id}")) for _ in range(10)
+    ]
+    check(not any(errors), "десять нажатий «Выполнено» ничего не сломали",
+          str(next((e for e in errors if e), "")))
+    async with session_scope() as session:
+        state = await session.scalar(select(Decision.status).where(Decision.id == decision_id))
+    check(state == DecisionStatus.DONE, "решение закрыто ровно один раз", str(state))
+
+    by_worker = await hit(callback_update(bot, TG["worker"], f"dn:done:{decision_id}"))
+    check(not by_worker, "сотрудник не уронил обработчик, закрывая чужое решение", by_worker or "")
+
+    errors = [await hit(callback_update(bot, TG["chief"], "ex:tasks")) for _ in range(10)]
+    check(not any(errors), "десять выгрузок подряд не уронили бота",
+          str(next((e for e in errors if e), "")))
+    exports = [c for c in net.calls if c[0] == "SendDocument"]
+    check(bool(exports), "и файл действительно отправлен", f"отправок: {len(exports)}")
+
+    print("\n22. Ответы бота и отзывчивость")
     check(
         not net.errors,
         "за весь прогон ни одно сообщение не было отвергнуто Telegram",

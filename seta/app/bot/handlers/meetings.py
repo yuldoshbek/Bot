@@ -28,11 +28,17 @@ from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt, to_local, utcnow
 from app.models.enums import MeetingStatus, RequestStatus, RoleCode, UserStatus
+from app.models.decision import AgendaItem
 from app.models.meeting import Meeting, MeetingParticipant, MeetingRequest
 from app.models.org import Organization
 from app.models.user import User
 from app.models.rbac import Role, UserRole
+from app.core.dates import humanize_due, parse_due
 from app.services import attendance, meetings as service, quotas
+from app.services import decisions as registry
+from app.services import documents as document_service
+from app.services import tasks as task_service
+from app.services.tasks import TaskError
 from app.services import slots as slot_service
 from app.services.rbac import Grant, has_permission
 
@@ -153,6 +159,37 @@ def _card_kb(
             InlineKeyboardButton(text="👎", callback_data=f"mt:rate:{meeting.id}:-1"),
         ])
 
+    # Итоги встречи. Решение и поручение доступны и после завершения: их
+    # обычно и фиксируют после, а не во время.
+    outcome_row = []
+    if has_permission(grants, "decision.create"):
+        outcome_row.append(InlineKeyboardButton(
+            text="📌 Решение", callback_data=f"mt:dec:{meeting.id}"
+        ))
+    if has_permission(grants, "task.create"):
+        outcome_row.append(InlineKeyboardButton(
+            text="➕ Поручение", callback_data=f"mt:task:{meeting.id}"
+        ))
+    if outcome_row:
+        rows.append(outcome_row)
+
+    tail = [InlineKeyboardButton(text="📎 Документы", callback_data=f"mt:files:{meeting.id}")]
+    if has_permission(grants, "meeting.finish"):
+        tail.append(InlineKeyboardButton(
+            text="📋 Повестка", callback_data=f"mt:agenda:{meeting.id}"
+        ))
+    rows.append(tail)
+
+    if (
+        live
+        and meeting.status != MeetingStatus.FINISHED
+        and now >= meeting.start_at
+        and has_permission(grants, "meeting.finish")
+    ):
+        rows.append([InlineKeyboardButton(
+            text="🏁 Завершить встречу", callback_data=f"mt:done:{meeting.id}"
+        )])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -173,6 +210,14 @@ async def _card_text(session: AsyncSession, meeting: Meeting, viewer: User) -> s
         lines.append(f"\n🚫 Отменена. Причина: {esc(meeting.cancel_reason or 'не указана')}")
     elif meeting.reschedule_count:
         lines.append(f"\n🔄 Переносилась {meeting.reschedule_count} раз(а)")
+
+    if meeting.status == MeetingStatus.FINISHED:
+        made_decisions, made_tasks = await registry.meeting_outcome(session, meeting)
+        if made_decisions or made_tasks:
+            lines.append(f"\n🏁 Итоги: решений {made_decisions}, поручений {made_tasks}")
+        else:
+            # Встреча без результата — не обвинение, а факт, который стоит видеть.
+            lines.append("\n🏁 Завершена. Решений и поручений не зафиксировано.")
     return "\n".join(lines)
 
 
@@ -759,5 +804,280 @@ async def quick_go(
     await call.message.answer(
         f"📣 Собрано на {fmt_dt(result.meeting.start_at, user.timezone)}.\n"
         f"Приглашения ушли: {len(chosen)}."
+    )
+    await call.answer()
+
+# ── Итоги встречи: повестка, завершение, решение, поручение, документы ──────
+class AgendaInput(StatesGroup):
+    title = State()
+
+
+class DecisionInput(StatesGroup):
+    title = State()
+
+
+class TaskFromMeeting(StatesGroup):
+    assignee = State()
+    title = State()
+
+
+async def _meeting_or_none(session: AsyncSession, call: CallbackQuery, user: User):
+    meeting_id = callback_int(call.data)
+    meeting = await session.get(Meeting, meeting_id) if meeting_id else None
+    if meeting is None or meeting.organization_id != user.organization_id:
+        return None
+    return meeting
+
+
+@router.callback_query(F.data.startswith("mt:agenda:"))
+async def agenda_show(
+    call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]
+) -> None:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    items = await registry.agenda_of(session, meeting)
+    lines = [f"📋 <b>Повестка</b>\n{esc(cut(meeting.title, 60))}", ""]
+    if items:
+        lines += [
+            f"{'✅' if item.covered else '▫️'} {item.position}. {esc(item.title)}"
+            for item in items
+        ]
+    else:
+        lines.append("Пунктов пока нет.")
+
+    rows = []
+    if meeting.status not in (MeetingStatus.FINISHED, MeetingStatus.CANCELLED):
+        rows.append([InlineKeyboardButton(
+            text="➕ Пункт повестки", callback_data=f"mt:agadd:{meeting.id}"
+        )])
+    for item in items:
+        if not item.covered:
+            rows.append([InlineKeyboardButton(
+                text=f"✅ {cut(item.title, 30)}", callback_data=f"mt:agok:{item.id}"
+            )])
+    await call.message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows[:6]) if rows else None,
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("mt:agadd:"))
+async def agenda_add(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession, user: User
+) -> None:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(meeting_id=meeting.id)
+    await call.message.answer("Что обсуждаем? Напишите пункт повестки.")
+    await state.set_state(AgendaInput.title)
+    await call.answer()
+
+
+@router.message(AgendaInput.title, F.text)
+async def agenda_save(
+    message: Message, state: FSMContext, session: AsyncSession, user: User
+) -> None:
+    data = await state.get_data()
+    meeting = await session.get(Meeting, data.get("meeting_id", 0))
+    if meeting is None:
+        await state.clear()
+        await message.answer(STALE_BUTTON)
+        return
+    result = await registry.add_agenda_item(
+        session, meeting=meeting, actor=user, title=message.text or ""
+    )
+    await state.clear()
+    if not result.ok:
+        await message.answer(result.reason or "Не получилось добавить пункт.")
+        return
+    await message.answer(f"📋 Пункт {result.item.position}: {esc(result.item.title)}")
+
+
+@router.callback_query(F.data.startswith("mt:agok:"))
+async def agenda_cover(call: CallbackQuery, session: AsyncSession, user: User) -> None:
+    item = await session.get(AgendaItem, callback_int(call.data) or 0)
+    meeting = await session.get(Meeting, item.meeting_id) if item else None
+    if item is None or meeting is None or meeting.organization_id != user.organization_id:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    result = await registry.mark_covered(session, item=item, meeting=meeting, actor=user)
+    if not result.ok:
+        await call.answer(result.reason or "Не получилось.", show_alert=True)
+        return
+    await call.answer("Отмечено.")
+
+
+@router.callback_query(F.data.startswith("mt:done:"))
+async def finish_meeting(call: CallbackQuery, session: AsyncSession, user: User) -> None:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    result = await service.finish(session, meeting=meeting, actor=user)
+    if not result.ok:
+        await call.answer(result.reason or "Не получилось.", show_alert=True)
+        return
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.message.answer(
+        "🏁 Встреча завершена.\n\nЗафиксируйте итоги, пока помните:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📌 Решение", callback_data=f"mt:dec:{meeting.id}"),
+            InlineKeyboardButton(text="➕ Поручение", callback_data=f"mt:task:{meeting.id}"),
+        ]]),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("mt:dec:"))
+async def decision_start(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession, user: User
+) -> None:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(meeting_id=meeting.id)
+    await call.message.answer("Что решили? Сформулируйте одной строкой.")
+    await state.set_state(DecisionInput.title)
+    await call.answer()
+
+
+@router.message(DecisionInput.title, F.text)
+async def decision_save(
+    message: Message, state: FSMContext, session: AsyncSession, user: User
+) -> None:
+    data = await state.get_data()
+    meeting = await session.get(Meeting, data.get("meeting_id", 0))
+    result = await registry.create(
+        session, actor=user, title=message.text or "", meeting=meeting
+    )
+    await state.clear()
+    if not result.ok:
+        await message.answer(result.reason or "Не получилось внести решение.")
+        return
+    await message.answer(
+        f"📌 Записано: <b>{esc(result.item.title)}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="📌 Ещё решение", callback_data=f"mt:dec:{meeting.id}"
+            ),
+            InlineKeyboardButton(
+                text="➕ Поручение", callback_data=f"mt:task:{meeting.id}"
+            ),
+        ]]) if meeting else None,
+    )
+
+
+@router.callback_query(F.data.startswith("mt:task:"))
+async def task_start(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant],
+) -> None:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    if not has_permission(grants, "task.create"):
+        await call.answer("Создавать поручения вам нельзя.", show_alert=True)
+        return
+
+    people = [p for p in await service.participants_of(session, meeting) if p.id != user.id]
+    if not people:
+        await call.answer("Кроме вас на встрече никого не было.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(meeting_id=meeting.id)
+    await call.message.answer(
+        "Кому поручаем?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=p.full_name, callback_data=f"mt:tsto:{p.id}")]
+            for p in people[:7]
+        ]),
+    )
+    await state.set_state(TaskFromMeeting.assignee)
+    await call.answer()
+
+
+@router.callback_query(TaskFromMeeting.assignee, F.data.startswith("mt:tsto:"))
+async def task_assignee(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession, user: User
+) -> None:
+    person = await session.get(User, callback_int(call.data) or 0)
+    if person is None or person.organization_id != user.organization_id:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    await state.update_data(assignee_id=person.id)
+    await call.message.answer(
+        f"Поручение для {esc(person.full_name)}.\n\nЧто сделать? Можно со сроком: "
+        "«подготовить смету до пятницы»."
+    )
+    await state.set_state(TaskFromMeeting.title)
+    await call.answer()
+
+
+@router.message(TaskFromMeeting.title, F.text)
+async def task_save(
+    message: Message, state: FSMContext, session: AsyncSession, user: User
+) -> None:
+    data = await state.get_data()
+    meeting = await session.get(Meeting, data.get("meeting_id", 0))
+    assignee = await session.get(User, data.get("assignee_id", 0))
+    if meeting is None or assignee is None:
+        await state.clear()
+        await message.answer(STALE_BUTTON)
+        return
+
+    title, due_at = parse_due(message.text or "", assignee.timezone)
+    try:
+        task = await task_service.create_task(
+            session, creator=user, assignee=assignee, title=title,
+            due_at=due_at, meeting_id=meeting.id,
+        )
+    except TaskError as error:
+        await state.clear()
+        await message.answer(str(error))
+        return
+
+    await state.clear()
+    when = f"\nСрок: {humanize_due(due_at, user.timezone)}" if due_at else ""
+    await message.answer(
+        f"➕ Поручение для {esc(assignee.full_name)}:\n<b>{esc(task.title)}</b>{when}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="➕ Ещё поручение", callback_data=f"mt:task:{meeting.id}"
+            ),
+        ]]),
+    )
+
+
+@router.callback_query(F.data.startswith("mt:files:"))
+async def meeting_files(call: CallbackQuery, session: AsyncSession, user: User) -> None:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    files = await document_service.for_meeting(session, meeting=meeting, viewer=user)
+    if not files:
+        await call.answer(
+            "Документов, открытых вам, у этой встречи нет.\n"
+            "Пришлите файл боту, чтобы приложить свой.",
+            show_alert=True,
+        )
+        return
+    await call.message.answer(
+        f"📎 <b>Документы встречи</b>\n{esc(cut(meeting.title, 60))}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=cut(f.title or f.file_name, 40), callback_data=f"dc:card:{f.id}"
+            )]
+            for f in files[:7]
+        ]),
     )
     await call.answer()
