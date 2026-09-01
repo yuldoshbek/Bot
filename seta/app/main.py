@@ -8,20 +8,17 @@ from contextlib import asynccontextmanager
 
 from aiogram.types import Update
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
-from sqlalchemy import func, select, text
+from fastapi.responses import HTMLResponse
 
 from app.bot.loader import bot, dp
 from app.bot.run import setup as setup_bot
 from app.core.config import settings
 from app.core.db import engine, session_scope
 from app.core.redis import redis
+from app.api.health_page import render
 from app.core.timeutil import utcnow
-from app.models.enums import NotificationStatus
-from app.models.notification import Notification
 from app.services.bootstrap import bootstrap
-
-# Целевой показатель по отставанию очереди — 5 секунд; тревога при заметном превышении.
-QUEUE_LAG_LIMIT = 120
+from app.services.health import collect
 
 log = logging.getLogger("seta.api")
 
@@ -59,54 +56,44 @@ api_v1 = APIRouter(prefix="/api/v1")
 
 
 @app.get("/health")
-async def health(response: Response) -> dict[str, object]:
-    """Состояние системы для внешнего мониторинга.
+async def health(request: Request, response: Response):
+    """Состояние системы. Один адрес для человека и для монитора.
 
-    Отвечает 503, если хоть одна зависимость недоступна или очередь встала.
-    Раньше здесь всегда возвращалось 200, и любой монитор считал лежащую базу
-    исправной работой - о сбое владелец узнавал от сотрудников.
+    Браузер просит HTML — получает страницу с показателями и последними ошибками.
+    Монитор просит JSON — получает данные. Код 503 в обоих случаях, если
+    что-то не работает: внешняя проверка увидит сбой раньше сотрудников.
     """
-    status: dict[str, object] = {"api": "ok"}
-    healthy = True
+    status = await collect()
 
-    try:
-        async with session_scope() as session:
-            await session.execute(text("SELECT 1"))
-            # Глубина очереди — второй важный признак: службы живы,
-            # а уведомления не уходят.
-            pending = await session.scalar(
-                select(func.count(Notification.id)).where(
-                    Notification.status == NotificationStatus.PENDING,
-                    Notification.scheduled_at <= utcnow(),
-                )
-            )
-            oldest = await session.scalar(
-                select(func.min(Notification.scheduled_at)).where(
-                    Notification.status == NotificationStatus.PENDING,
-                    Notification.scheduled_at <= utcnow(),
-                )
-            )
-        status["database"] = "ok"
-        status["queue_pending"] = pending or 0
-        lag = int((utcnow() - oldest).total_seconds()) if oldest else 0
-        status["queue_lag_seconds"] = lag
-        if lag > QUEUE_LAG_LIMIT:
-            status["queue"] = f"отставание {lag} с — обработчик не разбирает очередь"
-            healthy = False
-    except Exception as error:
-        status["database"] = f"error: {error.__class__.__name__}"
-        healthy = False
-
-    try:
-        await redis.ping()
-        status["redis"] = "ok"
-    except Exception as error:
-        status["redis"] = f"error: {error.__class__.__name__}"
-        healthy = False
-
-    if not healthy:
+    if not status.healthy:
         response.status_code = 503
-    return status
+
+    wants_html = "text/html" in (request.headers.get("accept") or "")
+    if wants_html:
+        return HTMLResponse(
+            render(status, utcnow()),
+            status_code=response.status_code or 200,
+        )
+
+    return {
+        "healthy": status.healthy,
+        "problems": status.problems,
+        "checks": {name: info["ok"] for name, info in status.checks.items()},
+        "services": {
+            name: {"ok": info["ok"], "silence_seconds": info.get("seconds")}
+            for name, info in status.services.items()
+        },
+        "numbers": status.numbers,
+        "errors_recent": [
+            {
+                "at": item["occurred_at"].isoformat(),
+                "source": item["source"],
+                "kind": item["kind"],
+                "message": item["message"][:200],
+            }
+            for item in status.errors[:5]
+        ],
+    }
 
 
 @app.post(settings.webhook_path)

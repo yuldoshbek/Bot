@@ -4,7 +4,7 @@
 и он в системе. Роль по ссылке отдела применяется сразу, выбранная
 самостоятельно уходит администратору на подтверждение.
 """
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -195,6 +195,7 @@ async def reg_contact(
     state: FSMContext,
     session: AsyncSession,
     organization: Organization,
+    bot: Bot,
 ) -> None:
     if message.contact.user_id != message.from_user.id:
         await message.answer("Пожалуйста, отправьте свой собственный номер — кнопкой ниже.")
@@ -250,7 +251,7 @@ async def reg_contact(
         "Как только её подтвердят, бот пришлёт уведомление — повторно писать не нужно.",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await notify_admins(session, user)
+    await notify_admins(bot, session, user)
 
 
 @router.message(Reg.contact)
@@ -258,10 +259,14 @@ async def reg_contact_fallback(message: Message) -> None:
     await message.answer("Нажмите кнопку «📱 Подтвердить номер» — вводить номер вручную не нужно.")
 
 
-async def notify_admins(session: AsyncSession, applicant: User) -> None:
-    """Одна карточка администратору: принять, изменить роль или отклонить."""
-    from app.bot.loader import bot
+async def notify_admins(bot: Bot, session: AsyncSession, applicant: User) -> None:
+    """Одна карточка администратору: принять, изменить роль или отклонить.
 
+    Бот приходит из диспетчера, а не берётся из app.bot.loader. Глобальный
+    экземпляр держит боевой токен, и проверочный прогон с подменённой сетью
+    всё равно отправлял бы настоящие сообщения живым людям - однажды так
+    и случилось.
+    """
     rows = await session.execute(
         select(User)
         .join(UserRole, UserRole.user_id == User.id)

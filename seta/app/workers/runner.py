@@ -16,6 +16,7 @@ import logging
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
 from app.services import deadlines
+from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
 
 logging.basicConfig(
@@ -37,6 +38,7 @@ async def delivery_loop() -> None:
 
     while True:
         try:
+            await beat("worker:delivery")
             if await acquire_lock("notifications:deliver", ttl_seconds=DELIVERY_INTERVAL * 3):
                 try:
                     async with session_scope() as session:
@@ -45,14 +47,16 @@ async def delivery_loop() -> None:
                         log.info("доставлено уведомлений: %s", sent)
                 finally:
                     await release_lock("notifications:deliver")
-        except Exception:
+        except Exception as error:
             log.exception("сбой доставки уведомлений")
+            await record_error(error, source="worker", context="доставка уведомлений")
         await asyncio.sleep(DELIVERY_INTERVAL)
 
 
 async def deadline_loop() -> None:
     while True:
         try:
+            await beat("worker:deadlines")
             if await acquire_lock("deadlines:check", ttl_seconds=DEADLINE_INTERVAL * 2):
                 try:
                     async with session_scope() as session:
@@ -64,8 +68,9 @@ async def deadline_loop() -> None:
                         )
                 finally:
                     await release_lock("deadlines:check")
-        except Exception:
+        except Exception as error:
             log.exception("сбой проверки сроков")
+            await record_error(error, source="worker", context="проверка сроков")
         await asyncio.sleep(DEADLINE_INTERVAL)
 
 

@@ -1,5 +1,6 @@
 from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.error import ErrorLog
 from app.models.enums import (
     AbsenceKind,
     Availability,
@@ -48,6 +49,7 @@ __all__ = [
     "Absence",
     "Holiday",
     "AuditLog",
+    "ErrorLog",
     "Task",
     "TaskEvent",
     "TaskComment",

@@ -20,8 +20,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
+from app.api.health_page import render
 from app.models import (
     AuditLog,
+    ErrorLog,
     Department,
     ExtensionStatus,
     Notification,
@@ -42,6 +44,7 @@ from app.models.enums import NotificationPriority, NotificationStatus
 from app.models.rbac import Role
 from app.services import deadlines
 from app.services import tasks as service
+from app.services.health import collect, record_error
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.notifications import (
     GROUP_MAX_ITEMS,
@@ -464,7 +467,69 @@ async def main() -> None:
             check(True, "база отвергает второй открытый запрос на продление")
             await session.rollback()
 
-    print("\n17. Уборка не трогает боевые данные")
+    print("\n17. Обработчики не берут настоящего бота напрямую")
+    # Это не придирка к стилю. Обработчик, импортирующий app.bot.loader.bot,
+    # держит боевой токен и шлёт настоящие сообщения даже из проверочного
+    # прогона с подменённой сетью. Однажды так и случилось: тест отправил
+    # владельцу пять уведомлений о вымышленном сотруднике.
+    handlers_dir = Path(__file__).resolve().parents[1] / "app" / "bot" / "handlers"
+    offenders = [
+        path.name
+        for path in handlers_dir.glob("*.py")
+        if "from app.bot.loader import bot" in path.read_text(encoding="utf-8")
+    ]
+    check(
+        not offenders,
+        "ни один обработчик не импортирует глобального бота",
+        f"нарушители: {offenders}",
+    )
+
+    print("\n18. Журнал ошибок и состояние системы")
+    async with session_scope() as session:
+        before = await session.scalar(select(func.count(ErrorLog.id)))
+
+    await record_error(
+        ValueError("проверочная ошибка блока укрепления"),
+        source="test",
+        context="проверка журнала",
+        telegram_user_id=930_000_999,
+    )
+
+    async with session_scope() as session:
+        after = await session.scalar(select(func.count(ErrorLog.id)))
+        latest = (
+            await session.execute(
+                select(ErrorLog).order_by(ErrorLog.id.desc()).limit(1)
+            )
+        ).scalar_one()
+    check(after == before + 1, "ошибка записана в журнал")
+    check(latest.kind == "ValueError", "тип ошибки сохранён")
+    check(latest.details and "ValueError" in latest.details, "сохранена и трассировка")
+    check(latest.context == "проверка журнала", "сохранено, что человек делал")
+
+    status = await collect()
+    check(status.numbers["errors_day"] >= 1, "ошибка попала в показатели состояния")
+    check(
+        any(e["kind"] == "ValueError" for e in status.errors),
+        "и в список последних ошибок",
+    )
+    check(
+        set(status.services) == {"bot", "worker:delivery", "worker:deadlines"},
+        "состояние следит за тремя службами",
+        f"следит за: {sorted(status.services)}",
+    )
+
+    page = render(status, utcnow())
+    check("<title>SETA" in page and "Состояние системы" in page, "страница состояния собирается")
+    check(
+        "проверочная ошибка" in page,
+        "и показывает последнюю ошибку человеку",
+    )
+
+    async with session_scope() as session:
+        await session.execute(delete(ErrorLog).where(ErrorLog.source == "test"))
+
+    print("\n19. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

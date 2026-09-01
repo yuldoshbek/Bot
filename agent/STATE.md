@@ -2,7 +2,7 @@
 
 **Обновлено:** 1 сентября 2026 (день)
 **Блоки:** 1 и 2 из 6 завершены, блок укрепления выполнен,
-кодовая база прочитана целиком — четыре находки исправлены
+кодовая база прочитана целиком, добавлен раздел состояния `/health`
 **Бот:** @Uzcosmos_meet_bot, режим long polling
 **Следующий:** блок 3 — календарь и встречи
 
@@ -100,12 +100,21 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block2.py   # 52 сценария
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/smoke_hardening.py # 41 сценарий
+  run --rm --no-deps migrate python scripts/smoke_hardening.py # 51 сценарий
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/stress_test.py    # 26 проверок на прочность
 ```
 
-Везде ожидается `Ошибок: 0`. Итого 154 проверки. Прогонять все четыре перед началом нового блока.
+Везде ожидается `Ошибок: 0`. Итого 164 проверки. Прогонять все четыре перед началом нового блока.
+
+### Состояние системы
+
+Откройте в браузере: **http://127.0.0.1:8010/health**
+
+Страница показывает, живы ли бот и оба фоновых цикла, не встала ли очередь,
+сколько ошибок за сутки и что именно падало. Обновляется сама каждые 30 секунд.
+Тот же адрес с заголовком `Accept: application/json` отдаёт данные для внешнего
+монитора и отвечает 503, когда что-то не работает.
 
 ### Подключение pgAdmin 4
 

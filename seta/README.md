@@ -37,9 +37,11 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
 Откройте своего бота в Telegram и отправьте `/start`.
 
+Состояние системы — в браузере: **http://127.0.0.1:8010/health**
+Там видно, живы ли бот и фоновые циклы, не встала ли очередь и что падало.
+
 ```bash
-docker compose logs -f bot     # что происходит
-curl http://127.0.0.1:8010/health
+docker compose logs -f bot     # подробности, если нужны
 ```
 
 ---

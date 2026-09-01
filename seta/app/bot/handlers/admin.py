@@ -4,7 +4,7 @@
 и рассылает ссылки отделов. Содержание встреч и поручений ему не показывается -
 роль управляет системой, а не читает переписку руководства.
 """
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -127,7 +127,7 @@ async def _user_card(session: AsyncSession, applicant: User) -> str:
 @router.callback_query(F.data.startswith("adm:approve:"))
 async def approve(
     call: CallbackQuery, session: AsyncSession, organization: Organization,
-    user: User, grants: dict[str, Grant],
+    user: User, grants: dict[str, Grant], bot: Bot,
 ) -> None:
     if not _require(grants, "admin.users"):
         await call.answer("Недостаточно прав.", show_alert=True)
@@ -147,13 +147,13 @@ async def approve(
     await call.message.edit_text(
         f"✅ <b>{esc(applicant.full_name)}</b> — доступ открыт\nРоль: {ROLE_TITLES[role]}"
     )
-    await _notify_user(applicant, f"Ваш доступ подтверждён. Роль: {ROLE_TITLES[role]}.\nНажмите /start.")
+    await _notify_user(bot, applicant, f"Ваш доступ подтверждён. Роль: {ROLE_TITLES[role]}.\nНажмите /start.")
 
 
 @router.callback_query(F.data.startswith("adm:reject:"))
 async def reject(
     call: CallbackQuery, session: AsyncSession, organization: Organization,
-    user: User, grants: dict[str, Grant],
+    user: User, grants: dict[str, Grant], bot: Bot,
 ) -> None:
     if not _require(grants, "admin.users"):
         await call.answer("Недостаточно прав.", show_alert=True)
@@ -167,7 +167,7 @@ async def reject(
     await reject_user(session, user=applicant, rejected_by=user.id)
     await call.answer("Отклонено")
     await call.message.edit_text(f"❌ <b>{esc(applicant.full_name)}</b> — заявка отклонена")
-    await _notify_user(applicant, "Заявка на доступ отклонена. Уточните детали у администратора.")
+    await _notify_user(bot, applicant, "Заявка на доступ отклонена. Уточните детали у администратора.")
 
 
 @router.callback_query(F.data.startswith("adm:role:"))
@@ -196,7 +196,7 @@ async def back_to_card(call: CallbackQuery, session: AsyncSession) -> None:
 @router.callback_query(F.data.startswith("adm:setrole:"))
 async def set_role(
     call: CallbackQuery, session: AsyncSession, organization: Organization,
-    user: User, grants: dict[str, Grant],
+    user: User, grants: dict[str, Grant], bot: Bot,
 ) -> None:
     if not _require(grants, "admin.roles"):
         await call.answer("Недостаточно прав.", show_alert=True)
@@ -223,7 +223,7 @@ async def set_role(
     await call.message.edit_text(
         f"✅ <b>{esc(applicant.full_name)}</b> — доступ открыт\nРоль: {ROLE_TITLES[role]}"
     )
-    await _notify_user(applicant, f"Ваш доступ подтверждён. Роль: {ROLE_TITLES[role]}.\nНажмите /start.")
+    await _notify_user(bot, applicant, f"Ваш доступ подтверждён. Роль: {ROLE_TITLES[role]}.\nНажмите /start.")
 
 
 # ── Сотрудники ──────────────────────────────────────────────────────────────
@@ -356,13 +356,12 @@ async def show_invites(call: CallbackQuery, session: AsyncSession, organization:
 
 @router.callback_query(F.data.startswith("adm:inv:"))
 async def make_invite(
-    call: CallbackQuery, session: AsyncSession, organization: Organization, user: User, grants: dict[str, Grant]
+    call: CallbackQuery, session: AsyncSession, organization: Organization,
+    user: User, grants: dict[str, Grant], bot: Bot,
 ) -> None:
     if not _require(grants, "admin.invites"):
         await call.answer("Недостаточно прав.", show_alert=True)
         return
-
-    from app.bot.loader import bot
 
     department_id = callback_int(call.data) or None
     label = "Без отдела"
@@ -421,9 +420,8 @@ async def show_audit(call: CallbackQuery, session: AsyncSession, grants: dict[st
     await call.message.answer("\n".join(lines))
 
 
-async def _notify_user(person: User, text: str) -> None:
-    from app.bot.loader import bot
-
+async def _notify_user(bot: Bot, person: User, text: str) -> None:
+    """Бот только из диспетчера: см. пояснение в start.notify_admins."""
     try:
         await bot.send_message(person.telegram_user_id, text)
     except Exception:
