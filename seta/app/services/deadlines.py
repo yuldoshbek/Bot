@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dates import humanize_due
+from app.core.text import esc
 from app.core.timeutil import utcnow
 from app.models.enums import (
     NotificationPriority,
@@ -103,7 +104,7 @@ async def process(session: AsyncSession, now: datetime | None = None) -> dict[st
             kind="task.overdue",
             priority=_priority_of(task),
             body=(
-                f"🔴 <b>Срок истёк</b>\n\n{task.title}\n"
+                f"🔴 <b>Срок истёк</b>\n\n{esc(task.title)}\n"
                 f"⏰ Был: {humanize_due(task.due_at, assignee.timezone)}\n\n"
                 "Отчитайтесь о выполнении или попросите перенести срок."
             ),
@@ -152,7 +153,7 @@ async def _remind(
         kind="task.due_soon",
         priority=NotificationPriority.NORMAL,
         body=(
-            f"⏰ <b>Срок {when_text}</b>\n\n{task.title}\n"
+            f"⏰ <b>Срок {when_text}</b>\n\n{esc(task.title)}\n"
             f"📅 {humanize_due(task.due_at, assignee.timezone)}"
         ),
         payload={"task_id": task.id},
@@ -186,8 +187,8 @@ async def _escalate(
         kind="task.escalation",
         priority=priority,
         body=(
-            f"{header}\n\n{task.title}\n"
-            f"👤 Исполнитель: {assignee.full_name if assignee else '—'}\n"
+            f"{header}\n\n{esc(task.title)}\n"
+            f"👤 Исполнитель: {esc(assignee.full_name) if assignee else '—'}\n"
             f"⏰ Срок был: {humanize_due(task.due_at, recipient.timezone)}"
         ),
         payload={"task_id": task.id},

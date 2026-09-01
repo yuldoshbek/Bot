@@ -10,7 +10,9 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import BTN_AVAILABILITY, BTN_WHO_IS_OPEN, availability_kb
+from app.bot.utils import STALE_BUTTON
 from app.core.config import settings
+from app.core.text import esc
 from app.core.timeutil import fmt_time, parse_hhmm, to_local, utcnow
 from app.models.enums import Availability, RoleCode
 from app.models.org import Organization
@@ -59,7 +61,15 @@ async def switch_availability(
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
-    _, action, argument = call.data.split(":", 2)
+    parts = call.data.split(":", 2)
+    if len(parts) < 3:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    _, action, argument = parts
+
+    if action not in ("OFF", "OPEN", "OPENLATE", "BUSY", "DND"):
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
 
     if action == "OFF":
         view = await set_state(
@@ -69,9 +79,13 @@ async def switch_availability(
     else:
         opens_late = action == "OPENLATE"
         state = Availability.OPEN if action in ("OPEN", "OPENLATE") else Availability(action)
-        minutes = (
-            _minutes_until_end_of_day(user) if argument == "day" else int(argument)
-        )
+        if argument == "day":
+            minutes = _minutes_until_end_of_day(user)
+        elif argument.isdigit():
+            minutes = int(argument)
+        else:
+            await call.answer(STALE_BUTTON, show_alert=True)
+            return
         view = await set_state(
             session,
             user=user,
@@ -110,8 +124,8 @@ async def who_is_open(
     lines = ["<b>Сейчас принимают</b>", ""]
     for person, view in rows:
         until = f" до {fmt_time(view.until_at, user.timezone)}" if view.until_at else ""
-        note = f"\n   {view.note}" if view.note else ""
-        lines.append(f"🟢 <b>{person.full_name}</b>{until}{note}")
+        note = f"\n   {esc(view.note)}" if view.note else ""
+        lines.append(f"🟢 <b>{esc(person.full_name)}</b>{until}{note}")
     lines.append("")
     lines.append("Можно обратиться сейчас, не создавая заявку.")
 

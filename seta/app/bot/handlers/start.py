@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.utils import STALE_BUTTON, callback_int
 from app.bot.keyboards.common import (
     approval_kb,
     department_choice_kb,
@@ -19,6 +20,7 @@ from app.bot.keyboards.common import (
     request_contact_kb,
     role_choice_kb,
 )
+from app.core.text import esc
 from app.models.enums import RoleCode, UserStatus
 from app.models.org import Organization
 from app.models.rbac import Role, UserRole
@@ -101,7 +103,7 @@ async def cmd_start(
 
     hello = "Здравствуйте! Это корпоративный помощник по встречам и поручениям."
     if invite is not None and invite.label:
-        hello += f"\nПриглашение: <b>{invite.label}</b>"
+        hello += f"\nПриглашение: <b>{esc(invite.label)}</b>"
 
     await message.answer(f"{hello}\n\nКак вас зовут? Напишите фамилию и имя.", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Reg.name)
@@ -138,7 +140,10 @@ async def reg_name(
 
 @router.callback_query(Reg.department, F.data.startswith("reg:dept:"))
 async def reg_department(call: CallbackQuery, state: FSMContext) -> None:
-    dept_id = int(call.data.rsplit(":", 1)[1])
+    dept_id = callback_int(call.data)
+    if dept_id is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
     await state.update_data(department_id=dept_id or None)
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer()
@@ -158,7 +163,11 @@ async def ask_role_or_contact(message: Message, state: FSMContext) -> None:
 async def reg_role(
     call: CallbackQuery, state: FSMContext, session: AsyncSession, organization: Organization
 ) -> None:
-    role = RoleCode(call.data.rsplit(":", 1)[1])
+    try:
+        role = RoleCode(call.data.rsplit(":", 1)[1])
+    except ValueError:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
     await state.update_data(requested_role=role)
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer()
@@ -223,7 +232,7 @@ async def reg_contact(
 
     if user.status == UserStatus.ACTIVE:
         roles = await user_role_codes(session, user)
-        text = f"Готово, {user.full_name}. Вы в системе."
+        text = f"Готово, {esc(user.full_name)}. Вы в системе."
         if RoleCode.ADMIN in roles:
             text += (
                 "\n\nВы первый в системе, поэтому вам выдана роль "
@@ -274,10 +283,10 @@ async def notify_admins(session: AsyncSession, applicant: User) -> None:
 
     text = (
         "📥 <b>Новая заявка на регистрацию</b>\n\n"
-        f"👤 {applicant.full_name}\n"
-        f"🏢 {department}\n"
+        f"👤 {esc(applicant.full_name)}\n"
+        f"🏢 {esc(department)}\n"
         f"🔑 Запрошенная роль: <b>{role_title}</b>\n"
-        f"📱 {applicant.phone or 'номер не подтверждён'}"
+        f"📱 {esc(applicant.phone) or 'номер не подтверждён'}"
     )
     for admin in admins:
         try:
@@ -290,7 +299,7 @@ async def notify_admins(session: AsyncSession, applicant: User) -> None:
 
 async def greeting(session: AsyncSession, user: User, roles: set[RoleCode]) -> str:
     titles = ", ".join(ROLE_TITLES[r] for r in sorted(roles, key=lambda r: r.value)) or "Сотрудник"
-    lines = [f"С возвращением, <b>{user.full_name}</b>.", f"Роль: {titles}"]
+    lines = [f"С возвращением, <b>{esc(user.full_name)}</b>.", f"Роль: {titles}"]
 
     if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
         view = await get_view(session, user.id)

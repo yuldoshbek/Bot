@@ -13,6 +13,7 @@
 | 4 | `agent/ARCHITECTURE.md` | Модель данных, права, слои, границы модулей |
 | 5 | `agent/CONVENTIONS.md` | Как писать код в этом проекте |
 | 6 | `agent/HISTORY.md` | Журнал сессий: что менялось и когда |
+| 7 | `STRUCTURE.md` | Что лежит в каждой папке и зачем нужен каждый файл |
 
 Полное техническое описание продукта — `Архитектура SETA.html` (открыть в браузере).
 Исходная постановка от заказчика — `Проект Бот.txt`.
@@ -39,9 +40,13 @@ cd seta
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block1.py
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/smoke_block2.py
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/stress_test.py
 ```
 
-Проверка должна показать `Ошибок: 0`. Если нет — сначала чини, потом делай новое.
+Все три должны показать `Ошибок: 0`. Если нет — сначала чини, потом делай новое.
 
 ## Что делать в конце работы
 

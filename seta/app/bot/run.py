@@ -6,6 +6,8 @@
 import asyncio
 import logging
 
+from aiogram.types import ErrorEvent
+
 from app.bot.handlers import admin, availability, menu, start, tasks
 from app.bot.loader import bot, dp
 from app.bot.middlewares.auth import AuthMiddleware
@@ -21,6 +23,26 @@ logging.basicConfig(
 log = logging.getLogger("seta.bot")
 
 
+async def on_error(event: ErrorEvent) -> bool:
+    """Последний рубеж: неожиданная ошибка не должна оставлять человека без ответа.
+
+    Обработчики защищены сами, но пользователь не обязан страдать от того,
+    чего мы не предусмотрели: он получает понятное сообщение, а мы — запись в логе.
+    """
+    log.exception("необработанная ошибка", exc_info=event.exception)
+
+    text = "Что-то пошло не так. Попробуйте ещё раз или нажмите /start."
+    update = event.update
+    try:
+        if update.callback_query is not None:
+            await update.callback_query.answer(text, show_alert=True)
+        elif update.message is not None:
+            await update.message.answer(text)
+    except Exception:
+        pass
+    return True
+
+
 def setup() -> None:
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
@@ -30,6 +52,8 @@ def setup() -> None:
     dp.include_router(admin.router)
     dp.include_router(tasks.router)
     dp.include_router(menu.router)
+
+    dp.errors.register(on_error)
 
 
 async def main() -> None:

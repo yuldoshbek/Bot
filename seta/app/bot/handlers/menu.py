@@ -17,6 +17,7 @@ from app.bot.keyboards.common import (
     BTN_REQUEST_MEETING,
     main_menu,
 )
+from app.core.text import esc
 from app.core.timeutil import fmt_time
 from app.models.enums import RoleCode
 from app.models.org import Department
@@ -58,10 +59,10 @@ async def profile(message: Message, session: AsyncSession, user: User, roles: se
     lines = [
         "<b>Профиль</b>",
         "",
-        f"👤 {user.full_name}",
-        f"🏢 {department}",
+        f"👤 {esc(user.full_name)}",
+        f"🏢 {esc(department)}",
         f"🔑 {titles}",
-        f"📱 {user.phone or 'номер не подтверждён'}",
+        f"📱 {esc(user.phone) or 'номер не подтверждён'}",
         f"🕐 Рабочий день: {schedule}",
         f"🌍 Часовой пояс: {user.timezone}",
     ]

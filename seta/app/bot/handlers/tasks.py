@@ -17,7 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import BTN_CONTROL, BTN_MY_TASKS, BTN_NEW_TASK, main_menu
+from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.dates import humanize_due, parse_due
+from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt
 from app.models.enums import Priority, RoleCode, TaskStatus, UserStatus
 from app.models.org import Organization
@@ -90,7 +92,8 @@ async def new_task_search(message: Message, session: AsyncSession, organization:
 
 @router.callback_query(NewTask.assignee, F.data.startswith("nt:who:"))
 async def new_task_assignee(call: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
-    assignee = await session.get(User, int(call.data.rsplit(":", 1)[1]))
+    assignee_id = callback_int(call.data)
+    assignee = await session.get(User, assignee_id) if assignee_id else None
     if assignee is None:
         await call.answer("Сотрудник не найден.", show_alert=True)
         return
@@ -192,8 +195,8 @@ async def new_task_priority(
     )
     await call.message.edit_text(
         f"✅ <b>Поручение создано</b>\n\n"
-        f"📋 {task.title}\n"
-        f"👤 {assignee.full_name}\n"
+        f"📋 {esc(cut(task.title, 200))}\n"
+        f"👤 {esc(assignee.full_name)}\n"
         f"⏰ {humanize_due(task.due_at, user.timezone) if task.due_at else 'без срока'}\n"
         f"🔺 {PRIORITY_LABELS[priority]}{review_line}\n\n"
         f"Исполнителю отправлено уведомление.",
@@ -226,7 +229,7 @@ async def _show_bucket(
         lines = [f"<b>{title}: {len(items)}</b>", ""]
         for task in items:
             due = f" · {humanize_due(task.due_at, user.timezone)}" if task.due_at else ""
-            lines.append(f"{STATUS_LABELS[TaskStatus(task.status)]}{due}\n📋 {task.title}")
+            lines.append(f"{STATUS_LABELS[TaskStatus(task.status)]}{due}\n📋 {esc(cut(task.title, 120))}")
         text = "\n\n".join(lines)
 
     keyboard = _buckets_kb(bucket, items)
@@ -271,7 +274,8 @@ async def control(
 async def open_task(
     call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
-    task = await session.get(Task, int(call.data.rsplit(":", 1)[1]))
+    task_id = callback_int(call.data)
+    task = await session.get(Task, task_id) if task_id else None
     if task is None:
         await call.answer("Поручение не найдено.", show_alert=True)
         return
@@ -293,8 +297,17 @@ async def task_action(
     user: User, grants: dict[str, Grant],
 ) -> None:
     parts = call.data.split(":")
-    action, task_id = parts[1], int(parts[2])
+    if len(parts) < 3:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+
+    action = parts[1]
     if action == "open":
+        return
+
+    task_id = callback_int(call.data, 2)
+    if task_id is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
         return
 
     task = await session.get(Task, task_id)
@@ -463,27 +476,27 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
     creator = await session.get(User, task.creator_id)
     assignee = await session.get(User, task.assignee_id)
 
-    author = creator.full_name if creator else "—"
+    author = esc(creator.full_name) if creator else "—"
     if task.on_behalf_of_id:
         principal = await session.get(User, task.on_behalf_of_id)
         if principal:
-            author = f"{author} по поручению: {principal.full_name}"
+            author = f"{author} по поручению: {esc(principal.full_name)}"
 
     lines = [
-        f"📋 <b>{task.title}</b>",
+        f"📋 <b>{esc(cut(task.title, 300))}</b>",
         "",
         f"Статус: {STATUS_LABELS[TaskStatus(task.status)]}",
-        f"👤 Исполнитель: {assignee.full_name if assignee else '—'}",
+        f"👤 Исполнитель: {esc(assignee.full_name) if assignee else '—'}",
         f"✍️ Автор: {author}",
     ]
     if task.due_at:
         lines.append(f"⏰ Срок: {humanize_due(task.due_at, viewer.timezone)}")
     lines.append(f"🔺 Приоритет: {PRIORITY_LABELS[Priority(task.priority)]}")
     if task.description:
-        lines += ["", task.description]
+        lines += ["", esc(cut(task.description, 800))]
     if task.requires_review:
         reviewer = await session.get(User, task.reviewer_id) if task.reviewer_id else None
-        lines.append(f"🔎 Проверяет: {reviewer.full_name if reviewer else '—'}")
+        lines.append(f"🔎 Проверяет: {esc(reviewer.full_name) if reviewer else '—'}")
     if task.personal_control:
         lines.append("⭐ На личном контроле руководителя")
     if task.rework_count:
@@ -496,7 +509,7 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
         lines += [
             "",
             f"⏰ <b>Просят перенести срок</b> на {humanize_due(extension.new_due_at, viewer.timezone)}",
-            f"💬 {extension.reason}",
+            f"💬 {esc(cut(extension.reason, 300))}",
         ]
 
     comments = (
@@ -511,8 +524,8 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
         lines += ["", "<b>Последние комментарии</b>"]
         for comment in reversed(list(comments)):
             author_user = await session.get(User, comment.author_id)
-            name = author_user.full_name if author_user else "—"
-            body = comment.text or f"📎 {comment.file_name or 'файл'}"
+            name = esc(author_user.full_name) if author_user else "—"
+            body = esc(cut(comment.text or f"📎 {comment.file_name or 'файл'}", 200))
             lines.append(f"• {name}: {body}")
 
     last = (

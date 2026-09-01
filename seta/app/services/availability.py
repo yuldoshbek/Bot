@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.text import esc
 from app.core.timeutil import fmt_time, utcnow
 from app.models.enums import Availability
 from app.models.schedule import AvailabilityLog, AvailabilityState
@@ -61,7 +62,7 @@ class AvailabilityView:
         if self.until_at and self.state != Availability.OFFLINE:
             parts.append(f"до {fmt_time(self.until_at, tz_name)}")
         if self.note:
-            parts.append(f"— {self.note}")
+            parts.append(f"— {esc(self.note)}")
         return " ".join(parts)
 
 

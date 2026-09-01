@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dates import humanize_due
+from app.core.text import esc
 from app.core.timeutil import to_local, to_utc, utcnow
 from app.models.enums import (
     ExtensionStatus,
@@ -179,11 +180,11 @@ async def create_task(
         },
     )
 
-    author = creator.full_name
+    author = esc(creator.full_name)
     if on_behalf_of_id:
         principal = await session.get(User, on_behalf_of_id)
         if principal:
-            author = f"{creator.full_name} по поручению: {principal.full_name}"
+            author = f"{esc(creator.full_name)} по поручению: {esc(principal.full_name)}"
 
     due_line = f"\n⏰ Срок: {humanize_due(due_at, assignee.timezone)}" if due_at else ""
     await enqueue(
@@ -198,7 +199,7 @@ async def create_task(
         ),
         body=(
             f"📋 <b>Новое поручение</b>\n\n"
-            f"{task.title}{due_line}\n"
+            f"{esc(task.title)}{due_line}\n"
             f"🔺 Приоритет: {PRIORITY_LABELS[Priority(priority)]}\n"
             f"👤 От: {author}"
         ),
@@ -298,7 +299,7 @@ async def accept(session: AsyncSession, task: Task, actor: User) -> None:
     await _notify(
         session, task.creator_id,
         f"task:{task.id}:accepted", "task.accepted", NotificationPriority.LOW,
-        f"✅ {actor.full_name} принял поручение: {task.title}",
+        f"✅ {esc(actor.full_name)} принял поручение: {esc(task.title)}",
         task.id,
     )
 
@@ -334,8 +335,9 @@ async def submit(
             session, task.reviewer_id,
             f"task:{task.id}:review:{task.rework_count}", "task.review_required",
             NotificationPriority.NORMAL,
-            f"🟠 <b>Требуется проверка</b>\n\n{task.title}\n👤 Исполнитель: {actor.full_name}"
-            + (f"\n💬 {comment}" if comment else ""),
+            f"🟠 <b>Требуется проверка</b>\n\n{esc(task.title)}\n"
+            f"👤 Исполнитель: {esc(actor.full_name)}"
+            + (f"\n💬 {esc(comment)}" if comment else ""),
             task.id,
         )
         return TaskStatus.REVIEW
@@ -347,8 +349,8 @@ async def submit(
     await _notify(
         session, task.creator_id,
         f"task:{task.id}:done", "task.done", NotificationPriority.NORMAL,
-        f"🟢 <b>Поручение выполнено</b>\n\n{task.title}\n👤 {actor.full_name}"
-        + (f"\n💬 {comment}" if comment else ""),
+        f"🟢 <b>Поручение выполнено</b>\n\n{esc(task.title)}\n👤 {esc(actor.full_name)}"
+        + (f"\n💬 {esc(comment)}" if comment else ""),
         task.id,
     )
     return TaskStatus.DONE
@@ -371,7 +373,7 @@ async def approve(
         session, task.assignee_id,
         f"task:{task.id}:approved:{task.rework_count}", "task.approved",
         NotificationPriority.NORMAL,
-        f"🟢 <b>Работа принята</b>\n\n{task.title}" + (f"\n💬 {comment}" if comment else ""),
+        f"🟢 <b>Работа принята</b>\n\n{esc(task.title)}" + (f"\n💬 {esc(comment)}" if comment else ""),
         task.id,
     )
 
@@ -394,7 +396,7 @@ async def return_for_rework(
         session, task.assignee_id,
         f"task:{task.id}:returned:{task.rework_count}", "task.returned",
         NotificationPriority.NORMAL,
-        f"🟠 <b>Возвращено на доработку</b>\n\n{task.title}\n💬 {comment}",
+        f"🟠 <b>Возвращено на доработку</b>\n\n{esc(task.title)}\n💬 {esc(comment)}",
         task.id,
     )
 
@@ -413,7 +415,7 @@ async def cancel(session: AsyncSession, task: Task, actor: User, reason: str | N
     await _notify(
         session, task.assignee_id,
         f"task:{task.id}:cancelled", "task.cancelled", NotificationPriority.NORMAL,
-        f"⚫ <b>Поручение отменено</b>\n\n{task.title}" + (f"\n💬 {reason}" if reason else ""),
+        f"⚫ <b>Поручение отменено</b>\n\n{esc(task.title)}" + (f"\n💬 {esc(reason)}" if reason else ""),
         task.id,
     )
 
@@ -426,6 +428,13 @@ async def request_extension(
         raise TaskError("Укажите причину переноса срока.")
     if task.due_at and new_due_at <= task.due_at:
         raise TaskError("Новый срок должен быть позже текущего.")
+
+    # Один открытый запрос на поручение. Иначе десять нажатий кнопки дают автору
+    # десять одинаковых карточек, и непонятно, какую из них он решает.
+    if await pending_extension(session, task.id) is not None:
+        raise TaskError(
+            "Запрос на перенос уже отправлен — ждём решения автора поручения."
+        )
 
     extension = TaskExtension(
         task_id=task.id,
@@ -444,10 +453,10 @@ async def request_extension(
         session, decider_id,
         f"task:{task.id}:ext:{extension.id}", "task.extension_requested",
         NotificationPriority.NORMAL,
-        f"⏰ <b>Просят перенести срок</b>\n\n{task.title}\n"
-        f"👤 {actor.full_name}\n"
+        f"⏰ <b>Просят перенести срок</b>\n\n{esc(task.title)}\n"
+        f"👤 {esc(actor.full_name)}\n"
         f"Было: {humanize_due(task.due_at) if task.due_at else 'без срока'}\n"
-        f"Станет: {humanize_due(new_due_at)}\n💬 {reason.strip()}",
+        f"Станет: {humanize_due(new_due_at)}\n💬 {esc(reason.strip())}",
         task.id,
     )
     return extension
@@ -492,9 +501,9 @@ async def decide_extension(
         session, extension.requested_by,
         f"task:{task.id}:extdone:{extension.id}", "task.extension_decided",
         NotificationPriority.NORMAL,
-        f"⏰ <b>Срок {verdict}</b>\n\n{task.title}\n"
+        f"⏰ <b>Срок {verdict}</b>\n\n{esc(task.title)}\n"
         f"Срок: {humanize_due(task.due_at) if task.due_at else 'без срока'}"
-        + (f"\n💬 {comment}" if comment else ""),
+        + (f"\n💬 {esc(comment)}" if comment else ""),
         task.id,
     )
 
@@ -543,8 +552,8 @@ async def add_comment(
             session, recipient,
             f"task:{task.id}:comment:{comment.id}", "task.comment",
             NotificationPriority.LOW,
-            f"💬 <b>{author.full_name}</b> в поручении «{task.title}»\n"
-            + (text or f"📎 {file_name or 'файл'}"),
+            f"💬 <b>{esc(author.full_name)}</b> в поручении «{esc(task.title)}»\n"
+            + esc(text or f"📎 {file_name or 'файл'}"),
             task.id,
         )
     return comment

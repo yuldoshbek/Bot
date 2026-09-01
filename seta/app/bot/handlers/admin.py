@@ -13,6 +13,8 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import BTN_ADMIN, admin_menu_kb, approval_kb, approval_role_kb
+from app.bot.utils import STALE_BUTTON, callback_int
+from app.core.text import esc
 from app.core.timeutil import fmt_dt
 from app.models.audit import AuditLog
 from app.models.enums import RoleCode, UserStatus
@@ -97,10 +99,10 @@ async def _user_card(session: AsyncSession, applicant: User) -> str:
     role_code = applicant.requested_role or RoleCode.EMPLOYEE
     role_title = ROLE_TITLES.get(RoleCode(role_code), role_code)
     return (
-        f"👤 <b>{applicant.full_name}</b>\n"
-        f"🏢 {department}\n"
+        f"👤 <b>{esc(applicant.full_name)}</b>\n"
+        f"🏢 {esc(department)}\n"
         f"🔑 Запрошенная роль: <b>{role_title}</b>\n"
-        f"📱 {applicant.phone or 'номер не подтверждён'}\n"
+        f"📱 {esc(applicant.phone) or 'номер не подтверждён'}\n"
         f"🕐 Заявка: {fmt_dt(applicant.created_at)}"
     )
 
@@ -111,7 +113,8 @@ async def approve(call: CallbackQuery, session: AsyncSession, user: User, grants
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
-    applicant = await session.get(User, int(call.data.rsplit(":", 1)[1]))
+    applicant_id = callback_int(call.data)
+    applicant = await session.get(User, applicant_id) if applicant_id else None
     if applicant is None:
         await call.answer("Заявка не найдена.", show_alert=True)
         return
@@ -120,7 +123,7 @@ async def approve(call: CallbackQuery, session: AsyncSession, user: User, grants
     await approve_user(session, user=applicant, role=role, approved_by=user.id)
     await call.answer("Принято")
     await call.message.edit_text(
-        f"✅ <b>{applicant.full_name}</b> — доступ открыт\nРоль: {ROLE_TITLES[role]}"
+        f"✅ <b>{esc(applicant.full_name)}</b> — доступ открыт\nРоль: {ROLE_TITLES[role]}"
     )
     await _notify_user(applicant, f"Ваш доступ подтверждён. Роль: {ROLE_TITLES[role]}.\nНажмите /start.")
 
@@ -131,14 +134,15 @@ async def reject(call: CallbackQuery, session: AsyncSession, user: User, grants:
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
-    applicant = await session.get(User, int(call.data.rsplit(":", 1)[1]))
+    applicant_id = callback_int(call.data)
+    applicant = await session.get(User, applicant_id) if applicant_id else None
     if applicant is None:
         await call.answer("Заявка не найдена.", show_alert=True)
         return
 
     await reject_user(session, user=applicant, rejected_by=user.id)
     await call.answer("Отклонено")
-    await call.message.edit_text(f"❌ <b>{applicant.full_name}</b> — заявка отклонена")
+    await call.message.edit_text(f"❌ <b>{esc(applicant.full_name)}</b> — заявка отклонена")
     await _notify_user(applicant, "Заявка на доступ отклонена. Уточните детали у администратора.")
 
 
@@ -147,14 +151,20 @@ async def change_role(call: CallbackQuery, grants: dict[str, Grant]) -> None:
     if not _require(grants, "admin.roles"):
         await call.answer("Недостаточно прав.", show_alert=True)
         return
-    applicant_id = int(call.data.rsplit(":", 1)[1])
+    applicant_id = callback_int(call.data)
+    if applicant_id is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
     await call.answer()
     await call.message.edit_reply_markup(reply_markup=approval_role_kb(applicant_id))
 
 
 @router.callback_query(F.data.startswith("adm:card:"))
 async def back_to_card(call: CallbackQuery, session: AsyncSession) -> None:
-    applicant_id = int(call.data.rsplit(":", 1)[1])
+    applicant_id = callback_int(call.data)
+    if applicant_id is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
     await call.answer()
     await call.message.edit_reply_markup(reply_markup=approval_kb(applicant_id))
 
@@ -165,17 +175,25 @@ async def set_role(call: CallbackQuery, session: AsyncSession, user: User, grant
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
-    _, _, applicant_id, role_code = call.data.split(":", 3)
-    applicant = await session.get(User, int(applicant_id))
+    parts = call.data.split(":", 3)
+    if len(parts) < 4 or not parts[2].isdigit():
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+
+    applicant = await session.get(User, int(parts[2]))
     if applicant is None:
         await call.answer("Сотрудник не найден.", show_alert=True)
         return
 
-    role = RoleCode(role_code)
+    try:
+        role = RoleCode(parts[3])
+    except ValueError:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
     await approve_user(session, user=applicant, role=role, approved_by=user.id)
     await call.answer("Роль назначена")
     await call.message.edit_text(
-        f"✅ <b>{applicant.full_name}</b> — доступ открыт\nРоль: {ROLE_TITLES[role]}"
+        f"✅ <b>{esc(applicant.full_name)}</b> — доступ открыт\nРоль: {ROLE_TITLES[role]}"
     )
     await _notify_user(applicant, f"Ваш доступ подтверждён. Роль: {ROLE_TITLES[role]}.\nНажмите /start.")
 
@@ -212,7 +230,7 @@ async def list_users(call: CallbackQuery, session: AsyncSession, organization: O
     lines = ["<b>Сотрудники</b>", ""]
     for person in people:
         titles = ", ".join(roles_by_user.get(person.id, [])) or "без роли"
-        lines.append(f"{marks.get(UserStatus(person.status), '⚪')} {person.full_name} — {titles}")
+        lines.append(f"{marks.get(UserStatus(person.status), '⚪')} {esc(person.full_name)} — {titles}")
 
     await call.message.answer("\n".join(lines))
 
@@ -227,7 +245,7 @@ async def show_departments(call: CallbackQuery, session: AsyncSession, organizat
     departments = await list_departments(session, organization.id)
     await call.answer()
     text = "<b>Отделы</b>\n\n" + (
-        "\n".join(f"• {d.name}" for d in departments) if departments else "Пока не заведено ни одного."
+        "\n".join(f"• {esc(d.name)}" for d in departments) if departments else "Пока не заведено ни одного."
     )
     await call.message.answer(
         text,
@@ -264,7 +282,7 @@ async def save_department(
         after={"name": name},
     )
     await state.clear()
-    await message.answer(f"Отдел «{name}» создан.\nТеперь можно выпустить для него ссылку-приглашение.")
+    await message.answer(f"Отдел «{esc(name)}» создан.\nТеперь можно выпустить для него ссылку-приглашение.")
 
 
 # ── Приглашения ─────────────────────────────────────────────────────────────
@@ -293,7 +311,7 @@ async def show_invites(call: CallbackQuery, session: AsyncSession, organization:
     text = "<b>Ссылки-приглашения</b>\n\nВыберите отдел — бот выдаст готовую ссылку.\n"
     if invites:
         text += "\nПоследние выпущенные:\n" + "\n".join(
-            f"• {i.label or 'без названия'} — использовано {i.used_count}" for i in invites
+            f"• {esc(i.label) or 'без названия'} — использовано {i.used_count}" for i in invites
         )
 
     await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -309,7 +327,7 @@ async def make_invite(
 
     from app.bot.loader import bot
 
-    department_id = int(call.data.rsplit(":", 1)[1]) or None
+    department_id = callback_int(call.data) or None
     label = "Без отдела"
     if department_id:
         dept = await session.get(Department, department_id)
@@ -331,7 +349,7 @@ async def make_invite(
 
     await call.answer("Ссылка готова")
     await call.message.answer(
-        f"<b>Ссылка для отдела «{label}»</b>\n\n"
+        f"<b>Ссылка для отдела «{esc(label)}»</b>\n\n"
         f"<code>{link}</code>\n\n"
         "Отправьте её в чат отдела. Все, кто перейдёт, получат роль «Сотрудник» "
         "автоматически — подтверждать вручную не нужно."
@@ -361,7 +379,7 @@ async def show_audit(call: CallbackQuery, session: AsyncSession, grants: dict[st
     lines = ["<b>Последние действия</b>", ""]
     for entry in entries:
         who = names.get(entry.actor_id or 0, "система")
-        lines.append(f"{fmt_dt(entry.created_at)} · {who} · <code>{entry.action}</code>")
+        lines.append(f"{fmt_dt(entry.created_at)} · {esc(who)} · <code>{esc(entry.action)}</code>")
 
     await call.message.answer("\n".join(lines))
 

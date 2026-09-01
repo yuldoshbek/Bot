@@ -48,6 +48,10 @@
 возврат на доработку, продление срока, пороги эскалации, дедупликация
 и группировка уведомлений, изоляция прав.
 
+`scripts/stress_test.py` — **23 проверки на прочность, 0 ошибок**: десять нажатий
+одной кнопки, гонка за один объект, чужие и подставленные идентификаторы,
+HTML и SQL в полях ввода, среднее время обработки обновления 15 мс.
+
 `scripts/smoke_block1.py` — **34 сценария, 0 ошибок**. Среди них:
 
 - сотрудник НЕ открывает чужое поручение;
@@ -91,10 +95,20 @@ curl http://127.0.0.1:8010/health # ожидается: api/database/redis = ok
 ```bash
 cd seta
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/smoke_block1.py
+  run --rm --no-deps migrate python scripts/smoke_block1.py   # 34 сценария
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/smoke_block2.py   # 52 сценария
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/stress_test.py    # 23 проверки на прочность
 ```
 
-Ожидается `Пройдено: 26   Ошибок: 0`.
+Везде ожидается `Ошибок: 0`. Прогонять все три перед началом нового блока.
+
+### Подключение pgAdmin 4
+
+Хост `localhost`, порт **55432**, база `seta`, пользователь `seta`,
+пароль — строка `POSTGRES_PASSWORD` в файле `seta/.env`.
+Порт открыт только на этой машине, наружу база не смотрит.
 
 ---
 
