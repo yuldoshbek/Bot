@@ -8,6 +8,7 @@ middleware и настоящую базу. Наружу ничего не ухо
 а то, что она не ломается, когда по ней бьют:
 
   - одна и та же кнопка нажата десять раз подряд;
+  - десять человек одновременно берут одно свободное окно;
   - десять нажатий одновременно (гонка за один объект);
   - чужой человек жмёт кнопки чужого поручения;
   - подставленный чужой идентификатор в callback;
@@ -36,12 +37,19 @@ from aiogram.methods import TelegramMethod
 from aiogram.types import Update
 from sqlalchemy import delete, func, select
 
-from app.bot.handlers import admin, availability, menu, start, tasks
+from app.bot.handlers import admin, availability, meetings, menu, start, tasks
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
 from app.models import (
     AuditLog,
+    Meeting,
+    MeetingAttendance,
+    MeetingParticipant,
+    MeetingRating,
+    MeetingRequest,
+    RequestStatus,
+    SlotHold,
     Department,
     Notification,
     Organization,
@@ -57,6 +65,7 @@ from app.models import (
     UserStatus,
     WorkingHours,
 )
+from app.services import slots as slot_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.tasks import create_task
 
@@ -179,7 +188,7 @@ def make_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
-    for module in (start, availability, admin, tasks, menu):
+    for module in (start, availability, admin, tasks, meetings, menu):
         dp.include_router(module.router)
     return dp
 
@@ -296,6 +305,25 @@ async def cleanup() -> None:
                 for model in (TaskEvent, TaskComment, TaskExtension):
                     await session.execute(delete(model).where(model.task_id.in_(task_ids)))
                 await session.execute(delete(Task).where(Task.id.in_(task_ids)))
+            # Встречи держат ссылки на людей из нескольких колонок сразу
+            # (владелец, автор, от чьего имени), поэтому убираются целиком
+            # по организации, а не по одной из этих ссылок.
+            meeting_ids = [
+                row[0] for row in (
+                    await session.execute(
+                        select(Meeting.id).where(Meeting.organization_id.in_(org_ids or [0]))
+                    )
+                ).all()
+            ]
+            if meeting_ids:
+                for model in (MeetingParticipant, MeetingAttendance, MeetingRating):
+                    await session.execute(delete(model).where(model.meeting_id.in_(meeting_ids)))
+            await session.execute(delete(SlotHold).where(SlotHold.owner_id.in_(user_ids)))
+            await session.execute(
+                delete(MeetingRequest).where(MeetingRequest.owner_id.in_(user_ids))
+            )
+            if meeting_ids:
+                await session.execute(delete(Meeting).where(Meeting.id.in_(meeting_ids)))
             for model in (UserRole, WorkingHours, Notification):
                 await session.execute(delete(model).where(model.user_id.in_(user_ids)))
             await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(user_ids)))
@@ -562,7 +590,174 @@ async def main() -> None:
         seen_by_newbie[:120],
     )
 
-    print("\n12. Ответы бота и отзывчивость")
+    print("\n12. Десять открытий «Мой день» подряд")
+    errors = [await hit(text_update(bot, TG["chief"], "📅 Мой день")) for _ in range(10)]
+    check(not any(errors), "экран дня выдержал десять открытий",
+          str(next((e for e in errors if e), "")))
+
+    print("\n13. Десять открытий «Запросить встречу» подряд")
+    sent_before = sum(1 for c in net.calls if c[0] == "SendMessage")
+    errors = [
+        await hit(text_update(bot, TG["worker"], "➕ Запросить встречу")) for _ in range(10)
+    ]
+    check(not any(errors), "запрос встречи выдержал десять открытий",
+          str(next((e for e in errors if e), "")))
+    # Считаем прирост, а не общее число: иначе проверка засчитает ответы,
+    # отправленные предыдущими разделами, и пройдёт на сломанном обработчике.
+    sent_after = sum(1 for c in net.calls if c[0] == "SendMessage")
+    check(
+        sent_after - sent_before >= 10,
+        "и на каждое нажатие пришёл ответ",
+        f"ответов: {sent_after - sent_before}",
+    )
+
+    print("\n14. Заявка целиком через кнопки")
+    before = len(net.errors)
+    await hit(text_update(bot, TG["worker"], "➕ Запросить встручу"))   # опечатка — не команда
+    await hit(text_update(bot, TG["worker"], "➕ Запросить встречу"))
+    # В этой организации руководителей двое, поэтому сначала выбор адресата.
+    # Если бы он был один, шаг пропускался бы и нажатие просто не сработало.
+    await hit(callback_update(bot, TG["worker"], f"nm:who:{ids['chief']}"))
+    await hit(callback_update(bot, TG["worker"], "nm:len:30"))
+    await hit(text_update(bot, TG["worker"], "<b>Тема</b> с разметкой & эмодзи 🙂"))
+
+    slot_buttons = []
+    for name, data in reversed(net.calls):
+        if name == "SendMessage" and "reply_markup" in data:
+            rows = data["reply_markup"].get("inline_keyboard", [])
+            slot_buttons = [
+                b["callback_data"] for row in rows for b in row
+                if str(b.get("callback_data", "")).startswith("nm:slot:")
+            ]
+            if slot_buttons:
+                break
+    check(bool(slot_buttons), "бот предложил свободные окна", f"кнопок: {len(slot_buttons)}")
+    check(
+        len(net.errors) == before,
+        "разметка ответов не сломалась на теме с HTML",
+        "; ".join(net.errors[before:][:2]),
+    )
+
+    if slot_buttons:
+        error = await hit(callback_update(bot, TG["worker"], slot_buttons[0]))
+        check(not error, "выбор окна прошёл", error or "")
+        async with session_scope() as session:
+            made = await session.scalar(
+                select(func.count(MeetingRequest.id)).where(
+                    MeetingRequest.initiator_id == ids["worker"]
+                )
+            )
+        check(made == 1, "заявка создана ровно одна", f"их {made}")
+
+    print("\n15. Десять человек одновременно берут одно окно")
+    async with session_scope() as session:
+        # Свободное окно у руководителя на завтра, известное всем нападающим.
+        chief = await session.get(User, ids["chief"])
+        found = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=3, limit=10
+        )
+    check(bool(found), "окна для гонки нашлись", f"их {len(found)}")
+
+    if found:
+        target = found[-1]
+        code = str(int(target.start.timestamp()) // 60)
+        racers = []
+        async with session_scope() as session:
+            org_id = ids["org"]
+            for i in range(10):
+                person = User(
+                    organization_id=org_id, telegram_user_id=930_100_000 + i,
+                    full_name=f"ТЕСТ гонщик {i}", status=UserStatus.ACTIVE,
+                    department_id=ids["department"], timezone="Asia/Tashkent", locale="ru",
+                )
+                session.add(person)
+                await session.flush()
+                await ensure_default_working_hours(session, person)
+                await grant_role(session, person, RoleCode.EMPLOYEE)
+                racers.append(person.telegram_user_id)
+
+        # Каждый доходит до выбора окна своим путём, затем все жмут разом.
+        for tg_id in racers:
+            await feed(dp, bot, text_update(bot, tg_id, "➕ Запросить встречу"))
+            await feed(dp, bot, callback_update(bot, tg_id, f"nm:who:{ids['chief']}"))
+            await feed(dp, bot, callback_update(bot, tg_id, "nm:len:30"))
+            await feed(dp, bot, text_update(bot, tg_id, "ТЕСТ гонка через бота"))
+
+        results = await asyncio.gather(
+            *(feed(dp, bot, callback_update(bot, tg_id, f"nm:slot:{code}")) for tg_id in racers),
+            return_exceptions=True,
+        )
+        broken = [r for r in results if r]
+        check(not broken, "ни одно нажатие не уронило обработчик", f"{broken[:1]}")
+
+        async with session_scope() as session:
+            holds = await session.scalar(
+                select(func.count(SlotHold.id)).where(
+                    SlotHold.start_at == target.start, SlotHold.released_at.is_(None)
+                )
+            )
+        check(holds == 1, "окно досталось одному", f"удержаний: {holds}")
+
+    print("\n16. Чужие и подставленные идентификаторы во встречах")
+    probes = [
+        "mt:card:999999999", "mt:card:abc", "mt:here:0", "mt:rate:1:99",
+        "mt:rate:abc:1", "mt:move:999999999", "mt:kill:999999999",
+        "rq:ok:999999999", "rq:no:abc", "nm:slot:0", "nm:len:999",
+    ]
+    errors = [await hit(callback_update(bot, TG["stranger"], probe)) for probe in probes]
+    check(not any(errors), "мусор в callback обработан без падений",
+          str(next((e for e in errors if e), "")))
+
+    async with session_scope() as session:
+        request_id = await session.scalar(
+            select(MeetingRequest.id).where(MeetingRequest.initiator_id == ids["worker"]).limit(1)
+        )
+    if request_id:
+        error = await hit(callback_update(bot, TG["stranger"], f"rq:ok:{request_id}"))
+        check(not error, "чужой не уронил обработчик, подтверждая чужую заявку", error or "")
+        async with session_scope() as session:
+            state = await session.scalar(
+                select(MeetingRequest.status).where(MeetingRequest.id == request_id)
+            )
+        check(state == RequestStatus.NEW, "и заявка осталась нерешённой", f"состояние: {state}")
+
+        error = await hit(callback_update(bot, TG["chief"], f"rq:ok:{request_id}"))
+        check(not error, "а руководитель её подтвердил", error or "")
+        async with session_scope() as session:
+            state = await session.scalar(
+                select(MeetingRequest.status).where(MeetingRequest.id == request_id)
+            )
+        check(state == RequestStatus.APPROVED, "заявка подтверждена", f"состояние: {state}")
+
+        errors = [
+            await hit(callback_update(bot, TG["chief"], f"rq:ok:{request_id}")) for _ in range(9)
+        ]
+        check(not any(errors), "ещё девять нажатий «Принять» ничего не сломали",
+              str(next((e for e in errors if e), "")))
+        async with session_scope() as session:
+            made = await session.scalar(
+                select(func.count(Meeting.id)).where(Meeting.request_id == request_id)
+            )
+        check(made == 1, "встреча всё равно одна", f"их {made}")
+
+    print("\n17. Мусор в теме встречи")
+    junk = [
+        "<script>alert(1)</script>", "ы" * 5000, "🙂" * 200, "<b>не закрыт",
+        "  ", "/start", "'; DROP TABLE meetings; --",
+    ]
+    before = len(net.errors)
+    for text in junk:
+        await hit(text_update(bot, TG["head"], "➕ Запросить встречу"))
+        await hit(callback_update(bot, TG["head"], f"nm:who:{ids['chief']}"))
+        await hit(callback_update(bot, TG["head"], "nm:len:15"))
+        await hit(text_update(bot, TG["head"], text))
+    check(
+        len(net.errors) == before,
+        "ни один ответ не сломал разметку Telegram",
+        "; ".join(net.errors[before:][:3]),
+    )
+
+    print("\n18. Ответы бота и отзывчивость")
     check(
         not net.errors,
         "за весь прогон ни одно сообщение не было отвергнуто Telegram",

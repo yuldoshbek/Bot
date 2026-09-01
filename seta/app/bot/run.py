@@ -8,7 +8,7 @@ import logging
 
 from aiogram.types import ErrorEvent
 
-from app.bot.handlers import admin, availability, menu, start, tasks
+from app.bot.handlers import admin, availability, meetings, menu, start, tasks
 from app.bot.loader import bot, dp
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.config import settings
@@ -66,6 +66,7 @@ def setup() -> None:
     dp.include_router(availability.router)
     dp.include_router(admin.router)
     dp.include_router(tasks.router)
+    dp.include_router(meetings.router)
     dp.include_router(menu.router)
 
     dp.errors.register(on_error)

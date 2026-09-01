@@ -9,14 +9,7 @@ from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import (
-    BTN_HELP,
-    BTN_MY_DAY,
-    BTN_MY_MEETINGS,
-    BTN_PROFILE,
-    BTN_REQUEST_MEETING,
-    main_menu,
-)
+from app.bot.keyboards.common import BTN_HELP, BTN_PROFILE, main_menu
 from app.core.text import esc
 from app.core.timeutil import fmt_time
 from app.models.enums import RoleCode
@@ -28,11 +21,7 @@ from app.services.rbac import ROLE_TITLES
 
 router = Router(name="menu")
 
-COMING_SOON = {
-    BTN_MY_MEETINGS: ("Встречи", 3),
-    BTN_REQUEST_MEETING: ("Запрос встречи", 3),
-    BTN_MY_DAY: ("Мой день", 3),
-}
+COMING_SOON: dict[str, tuple[str, int]] = {}
 
 
 @router.message(F.text == BTN_PROFILE)
@@ -85,8 +74,8 @@ async def help_message(message: Message, roles: set[RoleCode]) -> None:
         "Система ведёт встречи, поручения и контроль их исполнения.",
         "",
         "Сейчас работает: регистрация и права, поручения со сроками и контролем,",
-        "напоминания и эскалация, индикатор доступности.",
-        "Дальше по плану: календарь и встречи (блок 3).",
+        "напоминания и эскалация, индикатор доступности, календарь и встречи.",
+        "Дальше по плану: файлы и аналитика.",
         "",
         "Команды: /start — главное меню, /help — эта справка, /id — ваш Telegram ID.",
     ]

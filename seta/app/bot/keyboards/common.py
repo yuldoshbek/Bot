@@ -14,6 +14,7 @@ BTN_MY_MEETINGS = "📅 Мои встречи"
 BTN_MY_TASKS = "📋 Мои поручения"
 BTN_REQUEST_MEETING = "➕ Запросить встречу"
 BTN_NEW_TASK = "➕ Поручение"
+BTN_QUICK_MEETING = "⚡ Совещание"
 BTN_CONTROL = "📊 Контроль"
 BTN_AVAILABILITY = "🟢 Моя доступность"
 BTN_WHO_IS_OPEN = "👤 Кто на связи"
@@ -26,16 +27,14 @@ def main_menu(roles: set[RoleCode]) -> ReplyKeyboardMarkup:
     """Меню собирается по ролям: человек видит только то, что ему разрешено."""
     rows: list[list[KeyboardButton]] = []
 
-    if RoleCode.EXECUTIVE in roles:
+    if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
         rows.append([KeyboardButton(text=BTN_MY_DAY), KeyboardButton(text=BTN_CONTROL)])
         rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_AVAILABILITY)])
-    elif RoleCode.ASSISTANT in roles:
-        rows.append([KeyboardButton(text=BTN_MY_DAY), KeyboardButton(text=BTN_CONTROL)])
-        rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_AVAILABILITY)])
+        rows.append([KeyboardButton(text=BTN_QUICK_MEETING)])
     elif RoleCode.DEPT_HEAD in roles:
         rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
         rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_CONTROL)])
-        rows.append([KeyboardButton(text=BTN_REQUEST_MEETING)])
+        rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_QUICK_MEETING)])
     else:
         rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
         rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_WHO_IS_OPEN)])
