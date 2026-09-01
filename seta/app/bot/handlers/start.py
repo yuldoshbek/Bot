@@ -266,7 +266,12 @@ async def notify_admins(session: AsyncSession, applicant: User) -> None:
         select(User)
         .join(UserRole, UserRole.user_id == User.id)
         .join(Role, Role.id == UserRole.role_id)
-        .where(Role.code == RoleCode.ADMIN, User.status == UserStatus.ACTIVE)
+        .where(
+            Role.code == RoleCode.ADMIN,
+            User.status == UserStatus.ACTIVE,
+            # Заявка уходит администраторам своей организации, а не всем подряд.
+            User.organization_id == applicant.organization_id,
+        )
     )
     admins = list(rows.scalars().unique().all())
 

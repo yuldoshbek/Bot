@@ -1,7 +1,7 @@
 # Текущее состояние
 
-**Обновлено:** 31 августа 2026 (ночь)
-**Блоки:** 1 и 2 из 6 — завершены, проверены, работают
+**Обновлено:** 1 сентября 2026
+**Блоки:** 1 и 2 из 6 завершены, блок укрепления выполнен
 **Бот:** @Uzcosmos_meet_bot, режим long polling
 **Следующий:** блок 3 — календарь и встречи
 
@@ -99,10 +99,12 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block2.py   # 52 сценария
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/smoke_hardening.py # 41 сценарий
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/stress_test.py    # 23 проверки на прочность
 ```
 
-Везде ожидается `Ошибок: 0`. Прогонять все три перед началом нового блока.
+Везде ожидается `Ошибок: 0`. Итого 151 проверка. Прогонять все четыре перед началом нового блока.
 
 ### Подключение pgAdmin 4
 
@@ -134,3 +136,15 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 
 Шаблоны поручений — таблица `task_templates` создана, интерфейса пока нет.
 Статус «Заблокировано» существует в модели, кнопки в боте нет.
+
+### Отложено сознательно (из ревью)
+
+- **Транзакция бота охватывает обращения к Telegram.** Ограничитель одновременных
+  апдейтов и вынос отправки за транзакцию — работа блока 5, когда появится API
+  для Mini App и четвёртый потребитель пула соединений.
+- **Вебхук обрабатывает апдейт внутри HTTP-запроса.** Проявится только при
+  переключении на webhook; тогда же и чинить — дедупликацией по `update_id` в Redis.
+- **Единая функция доступа** вместо пары `can_access_object` / `access_for`.
+  Объединять до появления `meetings.access_for` в блоке 3.
+- **Хранение данных.** `notifications` и `task_events` растут вечно. Удаление
+  отправленных старше 90 дней — одна функция в воркере, нужна ближе к 500 пользователям.

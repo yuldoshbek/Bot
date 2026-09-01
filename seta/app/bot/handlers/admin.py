@@ -44,6 +44,23 @@ def _require(grants: dict[str, Grant], permission: str) -> bool:
     return has_permission(grants, permission)
 
 
+async def _applicant_of(
+    session: AsyncSession, data: str | None, organization: Organization
+) -> User | None:
+    """Сотрудник из данных кнопки — только из своей организации.
+
+    Идентификатор приходит от клиента: без сверки организации подставленный
+    номер позволил бы администратору действовать в чужой организации.
+    """
+    applicant_id = callback_int(data)
+    if applicant_id is None:
+        return None
+    applicant = await session.get(User, applicant_id)
+    if applicant is None or applicant.organization_id != organization.id:
+        return None
+    return applicant
+
+
 @router.message(F.text == BTN_ADMIN)
 async def admin_menu(message: Message, session: AsyncSession, organization: Organization, grants: dict[str, Grant]) -> None:
     if not _require(grants, "admin.users"):
@@ -108,15 +125,20 @@ async def _user_card(session: AsyncSession, applicant: User) -> str:
 
 
 @router.callback_query(F.data.startswith("adm:approve:"))
-async def approve(call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]) -> None:
+async def approve(
+    call: CallbackQuery, session: AsyncSession, organization: Organization,
+    user: User, grants: dict[str, Grant],
+) -> None:
     if not _require(grants, "admin.users"):
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
-    applicant_id = callback_int(call.data)
-    applicant = await session.get(User, applicant_id) if applicant_id else None
+    applicant = await _applicant_of(session, call.data, organization)
     if applicant is None:
         await call.answer("Заявка не найдена.", show_alert=True)
+        return
+    if applicant.status != UserStatus.PENDING:
+        await call.answer("Заявка уже рассмотрена.", show_alert=True)
         return
 
     role = RoleCode(applicant.requested_role or RoleCode.EMPLOYEE)
@@ -129,13 +151,15 @@ async def approve(call: CallbackQuery, session: AsyncSession, user: User, grants
 
 
 @router.callback_query(F.data.startswith("adm:reject:"))
-async def reject(call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]) -> None:
+async def reject(
+    call: CallbackQuery, session: AsyncSession, organization: Organization,
+    user: User, grants: dict[str, Grant],
+) -> None:
     if not _require(grants, "admin.users"):
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
-    applicant_id = callback_int(call.data)
-    applicant = await session.get(User, applicant_id) if applicant_id else None
+    applicant = await _applicant_of(session, call.data, organization)
     if applicant is None:
         await call.answer("Заявка не найдена.", show_alert=True)
         return
@@ -170,18 +194,22 @@ async def back_to_card(call: CallbackQuery, session: AsyncSession) -> None:
 
 
 @router.callback_query(F.data.startswith("adm:setrole:"))
-async def set_role(call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]) -> None:
+async def set_role(
+    call: CallbackQuery, session: AsyncSession, organization: Organization,
+    user: User, grants: dict[str, Grant],
+) -> None:
     if not _require(grants, "admin.roles"):
         await call.answer("Недостаточно прав.", show_alert=True)
         return
 
     parts = call.data.split(":", 3)
-    if len(parts) < 4 or not parts[2].isdigit():
+    applicant_id = callback_int(call.data, 2)
+    if len(parts) < 4 or applicant_id is None:
         await call.answer(STALE_BUTTON, show_alert=True)
         return
 
-    applicant = await session.get(User, int(parts[2]))
-    if applicant is None:
+    applicant = await session.get(User, applicant_id)
+    if applicant is None or applicant.organization_id != organization.id:
         await call.answer("Сотрудник не найден.", show_alert=True)
         return
 
@@ -267,9 +295,18 @@ async def new_department(call: CallbackQuery, state: FSMContext, grants: dict[st
 
 @router.message(StateFilter(AdminForms.department_name), F.text)
 async def save_department(
-    message: Message, state: FSMContext, session: AsyncSession, organization: Organization, user: User
+    message: Message, state: FSMContext, session: AsyncSession,
+    organization: Organization, user: User, grants: dict[str, Grant],
 ) -> None:
-    name = message.text.strip()
+    if not _require(grants, "admin.settings"):
+        await state.clear()
+        await message.answer("Недостаточно прав.")
+        return
+
+    name = message.text.strip()[:200]
+    if len(name) < 2:
+        await message.answer("Слишком короткое название. Напишите полностью.")
+        return
     department = Department(organization_id=organization.id, name=name)
     session.add(department)
     await session.flush()

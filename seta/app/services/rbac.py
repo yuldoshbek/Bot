@@ -250,12 +250,19 @@ async def can_access_object(
         return user.id in participants
 
     if scope == Scope.DEPARTMENT:
-        if department_id is not None and department_id == user.department_id:
+        # Человек без отдела не «свой» никому: иначе условие выродится
+        # в department_id IS NULL и откроет доступ ко всем таким же.
+        if user.department_id is None:
+            return False
+        # Свой отдел и все вложенные - та же семантика, что в access_for.
+        # Две разные трактовки «моего отдела» рано или поздно разойдутся.
+        visible = await visible_department_ids(session, user)
+        if department_id is not None and department_id in visible:
             return True
         if participants:
             rows = await session.execute(
                 select(User.id).where(
-                    User.id.in_(participants), User.department_id == user.department_id
+                    User.id.in_(participants), User.department_id.in_(visible)
                 )
             )
             return bool(rows.first())
@@ -291,8 +298,17 @@ async def visible_department_ids(session: AsyncSession, user: User) -> set[int]:
 
 
 async def user_role_codes(session: AsyncSession, user: User) -> set[RoleCode]:
+    """Действующие роли. Срок учитывается так же, как в load_grants:
+    иначе просроченная роль продолжала бы влиять на меню и на подписи действий."""
+    now = utcnow()
     rows = await session.execute(
-        select(Role.code).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user.id)
+        select(Role.code)
+        .join(UserRole, UserRole.role_id == Role.id)
+        .where(
+            UserRole.user_id == user.id,
+            (UserRole.valid_from.is_(None)) | (UserRole.valid_from <= now),
+            (UserRole.valid_to.is_(None)) | (UserRole.valid_to >= now),
+        )
     )
     return {RoleCode(code) for (code,) in rows.all()}
 

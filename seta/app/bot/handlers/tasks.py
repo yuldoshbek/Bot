@@ -26,7 +26,7 @@ from app.models.org import Organization
 from app.models.task import Task, TaskComment, TaskEvent
 from app.models.user import User
 from app.services import tasks as service
-from app.services.rbac import Grant, has_permission
+from app.services.rbac import Grant, can_access_object, has_permission, visible_department_ids
 from app.services.tasks import PRIORITY_LABELS, STATUS_LABELS, TaskError
 
 router = Router(name="tasks")
@@ -65,10 +65,10 @@ async def new_task(
         await message.answer("Создавать поручения может руководитель, ассистент или начальник отдела.")
         return
 
-    people = await _colleagues(session, organization.id, exclude_id=user.id)
+    people = await _allowed_assignees(session, user, grants)
     if not people:
         await message.answer(
-            "В системе пока нет других сотрудников.\n"
+            "Пока некому поручать: в вашей зоне ответственности нет активных сотрудников.\n"
             "Заведите отделы и разошлите ссылки-приглашения в разделе «Администрирование»."
         )
         return
@@ -82,20 +82,36 @@ async def new_task(
 
 
 @router.message(NewTask.assignee, F.text)
-async def new_task_search(message: Message, session: AsyncSession, organization: Organization) -> None:
+async def new_task_search(
+    message: Message, session: AsyncSession, organization: Organization,
+    user: User, grants: dict[str, Grant],
+) -> None:
     found = await service.find_assignee(session, organization.id, message.text)
-    if not found:
+    # Поиск тоже подчиняется области права, иначе он обходит список кандидатов.
+    allowed = []
+    for person in found:
+        if await _may_assign_to(session, user, grants, person):
+            allowed.append(person)
+    if not allowed:
         await message.answer("Никого не нашёл. Напишите часть фамилии или выберите из списка.")
         return
-    await message.answer("Кого имели в виду?", reply_markup=_people_kb(found))
+    await message.answer("Кого имели в виду?", reply_markup=_people_kb(allowed))
 
 
 @router.callback_query(NewTask.assignee, F.data.startswith("nt:who:"))
-async def new_task_assignee(call: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+async def new_task_assignee(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant],
+) -> None:
     assignee_id = callback_int(call.data)
     assignee = await session.get(User, assignee_id) if assignee_id else None
     if assignee is None:
         await call.answer("Сотрудник не найден.", show_alert=True)
+        return
+
+    # Идентификатор пришёл от клиента: проверяем заново, а не доверяем кнопке.
+    if not await _may_assign_to(session, user, grants, assignee):
+        await call.answer("Вы не можете поручать этому сотруднику.", show_alert=True)
         return
 
     await state.update_data(assignee_id=assignee.id, assignee_name=assignee.full_name)
@@ -153,16 +169,26 @@ async def new_task_no_due(call: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(NewTask.priority, F.data.startswith("nt:prio:"))
 async def new_task_priority(
     call: CallbackQuery, state: FSMContext, session: AsyncSession,
-    user: User, roles: set[RoleCode],
+    user: User, roles: set[RoleCode], grants: dict[str, Grant],
 ) -> None:
     from datetime import datetime
 
-    priority = Priority(call.data.rsplit(":", 1)[1])
+    try:
+        priority = Priority(call.data.rsplit(":", 1)[1])
+    except ValueError:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+
     data = await state.get_data()
-    assignee = await session.get(User, data["assignee_id"])
+    assignee = await session.get(User, data.get("assignee_id", 0))
     if assignee is None:
         await call.answer("Исполнитель не найден.", show_alert=True)
         await state.clear()
+        return
+
+    if not await _may_assign_to(session, user, grants, assignee):
+        await state.clear()
+        await call.answer("Вы не можете поручать этому сотруднику.", show_alert=True)
         return
 
     due_at = datetime.fromisoformat(data["due_at"]) if data.get("due_at") else None
@@ -213,6 +239,9 @@ async def my_tasks(message: Message, session: AsyncSession, user: User) -> None:
 @router.callback_query(F.data.startswith("tl:"))
 async def switch_bucket(call: CallbackQuery, session: AsyncSession, user: User) -> None:
     bucket = call.data.rsplit(":", 1)[1]
+    if bucket not in BUCKETS:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
     await call.answer()
     await _show_bucket(call.message, session, user, bucket, edit=True)
 
@@ -248,7 +277,10 @@ async def control(
         return
 
     scope_all = grants["task.read"].scope == "ORGANIZATION"
-    counters = await service.control_counters(session, user, scope_all)
+    department_ids = None
+    if not scope_all and grants["task.read"].scope == "DEPARTMENT":
+        department_ids = await visible_department_ids(session, user)
+    counters = await service.control_counters(session, user, scope_all, department_ids)
 
     await message.answer(
         "<b>📊 Контроль исполнения</b>\n\n"
@@ -310,7 +342,10 @@ async def task_action(
         await call.answer(STALE_BUTTON, show_alert=True)
         return
 
-    task = await session.get(Task, task_id)
+    # Строка блокируется на время перехода: без этого десять одновременных
+    # нажатий «Принять работу» прошли бы проверку статуса каждое и записали
+    # десять событий в историю.
+    task = await session.get(Task, task_id, with_for_update=True)
     if task is None:
         await call.answer("Поручение не найдено.", show_alert=True)
         return
@@ -387,9 +422,16 @@ async def input_rework(
     user: User, grants: dict[str, Grant],
 ) -> None:
     data = await state.get_data()
-    task = await session.get(Task, data["task_id"])
+    task = await session.get(Task, data.get("task_id", 0), with_for_update=True)
     await state.clear()
     if task is None:
+        return
+
+    # Между нажатием кнопки и отправкой текста может пройти сколько угодно
+    # времени: право могли отозвать, поручение отменить, проверяющего сменить.
+    access = await service.access_for(session, task, user, grants)
+    if not access.can_review:
+        await message.answer("Проверять это поручение сейчас нельзя.")
         return
 
     try:
@@ -405,12 +447,18 @@ async def input_rework(
 
 @router.message(TaskInput.comment)
 async def input_comment(
-    message: Message, state: FSMContext, session: AsyncSession, user: User
+    message: Message, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant],
 ) -> None:
     data = await state.get_data()
-    task = await session.get(Task, data["task_id"])
+    task = await session.get(Task, data.get("task_id", 0))
     await state.clear()
     if task is None:
+        return
+
+    access = await service.access_for(session, task, user, grants)
+    if not access.can_comment:
+        await message.answer("Это поручение вам недоступно.")
         return
 
     file_id = file_name = None
@@ -450,14 +498,20 @@ async def input_extension_date(message: Message, state: FSMContext, user: User) 
 
 @router.message(TaskInput.extension_reason, F.text)
 async def input_extension_reason(
-    message: Message, state: FSMContext, session: AsyncSession, user: User
+    message: Message, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant],
 ) -> None:
     from datetime import datetime
 
     data = await state.get_data()
-    task = await session.get(Task, data["task_id"])
+    task = await session.get(Task, data.get("task_id", 0), with_for_update=True)
     await state.clear()
     if task is None:
+        return
+
+    access = await service.access_for(session, task, user, grants)
+    if not access.can_request_extension:
+        await message.answer("Переносить срок этого поручения сейчас нельзя.")
         return
 
     try:
@@ -615,20 +669,51 @@ def _priority_kb() -> InlineKeyboardMarkup:
     )
 
 
-async def _colleagues(
-    session: AsyncSession, organization_id: int, exclude_id: int
+async def _allowed_assignees(
+    session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> list[User]:
-    rows = await session.execute(
-        select(User)
-        .where(
-            User.organization_id == organization_id,
-            User.status == UserStatus.ACTIVE,
-            User.id != exclude_id,
-        )
-        .order_by(User.full_name)
-        .limit(10)
+    """Кому этот человек вправе поручать.
+
+    Право task.create есть и у рядового сотрудника, но с областью «только свои».
+    Без учёта области список кандидатов включал бы всю организацию, и сотрудник
+    мог бы назначить поручение руководителю.
+    """
+    scope = grants["task.create"].scope
+    query = select(User).where(
+        User.organization_id == user.organization_id,
+        User.status == UserStatus.ACTIVE,
     )
+
+    if scope == "SELF":
+        query = query.where(User.id == user.id)
+    elif scope == "DEPARTMENT":
+        visible = await visible_department_ids(session, user)
+        if not visible:
+            return []
+        query = query.where(User.department_id.in_(visible))
+    elif scope == "SUBORDINATES":
+        query = query.where(User.manager_id == user.id)
+
+    rows = await session.execute(query.order_by(User.full_name).limit(20))
     return list(rows.scalars().all())
+
+
+async def _may_assign_to(
+    session: AsyncSession, user: User, grants: dict[str, Grant], assignee: User
+) -> bool:
+    """Проверка конкретной записи: область права плюс граница организации."""
+    if assignee.organization_id != user.organization_id:
+        return False
+    if assignee.status != UserStatus.ACTIVE:
+        return False
+    return await can_access_object(
+        session,
+        user,
+        grants,
+        "task.create",
+        owner_id=assignee.id,
+        department_id=assignee.department_id,
+    )
 
 
 async def _executive_of(session: AsyncSession, organization_id: int) -> User | None:

@@ -10,6 +10,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +26,13 @@ class Task(Base, PKMixin, TimestampMixin):
         Index("ix_tasks_assignee_status_due", "assignee_id", "status", "due_at"),
         Index("ix_tasks_reviewer_status", "reviewer_id", "status"),
         Index("ix_tasks_creator_status", "creator_id", "status"),
+        # Планировщик читает только поручения с близким сроком. Частичный индекс
+        # держит его стоимость независимой от размера архива выполненных.
+        Index(
+            "ix_tasks_due_watch",
+            "due_at",
+            postgresql_where=text("status IN ('NEW','ACKNOWLEDGED','IN_PROGRESS','BLOCKED','OVERDUE') AND due_at IS NOT NULL"),
+        ),
     )
 
     organization_id: Mapped[int] = mapped_column(
@@ -70,6 +78,13 @@ class Task(Base, PKMixin, TimestampMixin):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # До какой ступени эскалации уже дошло поручение: 0 - норма, 1 - просрочено,
+    # 2 - сообщено начальнику отдела, 3 - подключён ассистент.
+    # Без этого поля планировщик каждую минуту пытался бы вставить уведомление
+    # заново: конфликт по event_key его отбрасывает, но мёртвая строка в таблице
+    # и в индексе всё равно остаётся, и база пухнет на ровном месте.
+    escalation_level: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
 
     # Сколько раз работу возвращали на доработку - основа показателя качества.
     rework_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
@@ -117,6 +132,15 @@ class TaskExtension(Base, PKMixin):
     # Исполнитель не двигает срок сам: он просит, автор решает.
     # Каждое продление сохраняется вместе с причиной.
     __tablename__ = "task_extensions"
+    __table_args__ = (
+        # Один открытый запрос на поручение — правило в схеме, а не в коде.
+        Index(
+            "uq_task_extension_open",
+            "task_id",
+            unique=True,
+            postgresql_where=text("status = 'NEW'"),
+        ),
+    )
 
     task_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True

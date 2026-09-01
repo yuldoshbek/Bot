@@ -67,8 +67,12 @@ async def main() -> None:
     log.info("Бот запущен: @%s", me.username)
 
     if settings.bot_mode == "webhook":
+        # Апдейты принимает API. Процесс не завершается: иначе restart-политика
+        # поднимала бы контейнер по кругу, и в логах вместо работы был бы поток
+        # перезапусков, в котором не видно настоящих ошибок.
         log.info("Режим webhook: апдейты принимает API на %s", settings.webhook_path)
-        return
+        while True:
+            await asyncio.sleep(3600)
 
     await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

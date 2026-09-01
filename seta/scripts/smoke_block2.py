@@ -283,7 +283,7 @@ async def main() -> None:
         check(
             await session.scalar(
                 select(func.count(Notification.id)).where(
-                    Notification.event_key == f"task:{watched.id}:overdue"
+                    Notification.event_key == f"task:{watched.id}:overdue:0"
                 )
             ) == 1,
             "исполнителю сообщено о просрочке",
@@ -297,7 +297,7 @@ async def main() -> None:
             await session.scalar(
                 select(func.count(Notification.id)).where(
                     Notification.user_id == head.id,
-                    Notification.event_key == f"task:{watched.id}:esc1",
+                    Notification.event_key == f"task:{watched.id}:esc1:0",
                 )
             ) == 1,
             "через день просрочка ушла начальнику отдела",
@@ -310,7 +310,7 @@ async def main() -> None:
             await session.scalar(
                 select(func.count(Notification.id)).where(
                     Notification.user_id == assistant.id,
-                    Notification.event_key == f"task:{watched.id}:esc3",
+                    Notification.event_key == f"task:{watched.id}:esc3:0",
                 )
             ) == 1,
             "через три дня подключился ассистент",
@@ -336,7 +336,7 @@ async def main() -> None:
             await session.execute(
                 select(Notification).where(
                     Notification.user_id == chief.id,
-                    Notification.event_key == f"task:{personal.id}:pc",
+                    Notification.event_key == f"task:{personal.id}:pc:0",
                 )
             )
         ).scalar_one_or_none()

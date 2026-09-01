@@ -329,8 +329,13 @@ async def main() -> None:
         check(founder.status == UserStatus.ACTIVE, "первый вошедший активирован сразу")
         check(RoleCode.ADMIN in founder_roles, "первому выдана роль администратора")
         check(
-            RoleCode.ASSISTANT in founder_roles,
-            "запрошенная роль сохранена вместе с административной",
+            RoleCode.ASSISTANT not in founder_roles,
+            "повышенную роль первый вошедший себе НЕ выдаёт",
+            f"получены роли: {sorted(str(r) for r in founder_roles)}",
+        )
+        check(
+            RoleCode.EMPLOYEE in founder_roles,
+            "вместо неё выдана роль рядового сотрудника",
         )
 
         second = await start_registration(

@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, PKMixin, TimestampMixin
@@ -9,6 +18,15 @@ from app.models.enums import RoleCode, UserStatus
 
 class User(Base, PKMixin, TimestampMixin):
     __tablename__ = "users"
+    __table_args__ = (
+        # Поиск исполнителя по части фамилии. Без триграммного индекса
+        # LIKE '%...%' читает таблицу целиком на каждую букву.
+        Index(
+            "ix_users_full_name_trgm",
+            text("lower(full_name) gin_trgm_ops"),
+            postgresql_using="gin",
+        ),
+    )
 
     organization_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True

@@ -34,7 +34,8 @@ def main_menu(roles: set[RoleCode]) -> ReplyKeyboardMarkup:
         rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_AVAILABILITY)])
     elif RoleCode.DEPT_HEAD in roles:
         rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
-        rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_CONTROL)])
+        rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_CONTROL)])
+        rows.append([KeyboardButton(text=BTN_REQUEST_MEETING)])
     else:
         rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
         rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_WHO_IS_OPEN)])

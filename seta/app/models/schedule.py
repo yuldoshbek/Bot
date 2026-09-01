@@ -12,6 +12,8 @@ from sqlalchemy import (
     Text,
     Time,
 )
+from sqlalchemy import Index, text
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, PKMixin, TimestampMixin
@@ -83,6 +85,17 @@ class AvailabilityLog(Base, PKMixin):
 class CalendarBlock(Base, PKMixin, TimestampMixin):
     # Личная блокировка времени: "не занимать".
     __tablename__ = "calendar_blocks"
+    __table_args__ = (
+        Index("ix_calendar_blocks_user_interval", "user_id", "start_at", "end_at"),
+        # Пересекающиеся блокировки одного человека невозможны на уровне базы:
+        # двойное бронирование отвергается независимо от того, что решил код.
+        ExcludeConstraint(
+            ("user_id", "="),
+            (text("tstzrange(start_at, end_at)"), "&&"),
+            name="excl_calendar_blocks_overlap",
+            using="gist",
+        ),
+    )
 
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -98,6 +111,9 @@ class CalendarBlock(Base, PKMixin, TimestampMixin):
 class Absence(Base, PKMixin, TimestampMixin):
     # Отпуск, командировка, больничный: влияют и на календарь, и на сроки поручений.
     __tablename__ = "absences"
+    __table_args__ = (
+        Index("ix_absences_user_interval", "user_id", "start_date", "end_date"),
+    )
 
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -114,6 +130,9 @@ class Absence(Base, PKMixin, TimestampMixin):
 class Holiday(Base, PKMixin, TimestampMixin):
     # Праздничный или перенесённый рабочий день организации.
     __tablename__ = "holidays"
+    __table_args__ = (
+        Index("ix_holidays_org_day", "organization_id", "day"),
+    )
 
     organization_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False

@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import BTN_AVAILABILITY, BTN_WHO_IS_OPEN, availability_kb
-from app.bot.utils import STALE_BUTTON
+from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.config import settings
 from app.core.text import esc
 from app.core.timeutil import fmt_time, parse_hhmm, to_local, utcnow
@@ -81,11 +81,14 @@ async def switch_availability(
         state = Availability.OPEN if action in ("OPEN", "OPENLATE") else Availability(action)
         if argument == "day":
             minutes = _minutes_until_end_of_day(user)
-        elif argument.isdigit():
-            minutes = int(argument)
         else:
-            await call.answer(STALE_BUTTON, show_alert=True)
-            return
+            value = callback_int(call.data)
+            if value is None:
+                await call.answer(STALE_BUTTON, show_alert=True)
+                return
+            # Ограничение по смыслу решения Р-12: вечного «доступен» не бывает,
+            # а значение из кнопки приходит от клиента и может быть любым.
+            minutes = min(max(value, 15), 720)
         view = await set_state(
             session,
             user=user,

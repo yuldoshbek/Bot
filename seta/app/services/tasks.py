@@ -26,6 +26,7 @@ from app.models.enums import (
     RoleCode,
     TaskEventKind,
     TaskStatus,
+    UserStatus,
 )
 from app.models.rbac import Role, UserRole
 from app.models.task import Task, TaskComment, TaskEvent, TaskExtension
@@ -110,7 +111,14 @@ async def resolve_reviewer(
             select(User)
             .join(UserRole, UserRole.user_id == User.id)
             .join(Role, Role.id == UserRole.role_id)
-            .where(Role.code == RoleCode.ASSISTANT, User.organization_id == creator.organization_id)
+            .where(
+                Role.code == RoleCode.ASSISTANT,
+                User.organization_id == creator.organization_id,
+                # Приостановленный сотрудник не может быть проверяющим,
+                # иначе поручение зависнет на проверке навсегда.
+                User.status == UserStatus.ACTIVE,
+            )
+            .order_by(User.id)
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -190,6 +198,7 @@ async def create_task(
     await enqueue(
         session,
         user_id=assignee.id,
+        organization_id=task.organization_id,
         event_key=f"task:{task.id}:assigned",
         kind="task.assigned",
         priority=(
@@ -320,9 +329,14 @@ async def submit(
     session: AsyncSession, task: Task, actor: User, comment: str | None = None
 ) -> TaskStatus:
     """Исполнитель отчитался. Дальше - проверка или сразу закрытие."""
+    # Множество статусов совпадает с TaskAccess.can_submit: правило перехода
+    # обязано жить в самом переходе, иначе API блока 5 пойдёт мимо проверки.
     _require(
-        task.status not in (TaskStatus.DONE, TaskStatus.CANCELLED),
-        "Поручение уже закрыто.",
+        task.status in (
+            TaskStatus.ACKNOWLEDGED, TaskStatus.IN_PROGRESS,
+            TaskStatus.OVERDUE, TaskStatus.BLOCKED,
+        ),
+        "Отчитаться по этому поручению сейчас нельзя.",
     )
     before = task.status
     task.submitted_at = utcnow()
@@ -401,8 +415,29 @@ async def return_for_rework(
     )
 
 
+async def mark_overdue(session: AsyncSession, task: Task) -> None:
+    """Срок прошёл. Переход здесь, рядом с остальными: иначе появится второе
+    место, где меняется статус, и оно забудет про историю и журнал."""
+    if task.status == TaskStatus.OVERDUE:
+        return
+    before = task.status
+    task.status = TaskStatus.OVERDUE
+    await add_event(
+        session, task, actor_id=None, kind=TaskEventKind.OVERDUE,
+        from_status=before, to_status=task.status,
+    )
+    await write_audit(
+        session, actor_id=None, action="task.overdue", entity_type="task",
+        entity_id=task.id, before={"status": before}, after={"status": task.status},
+        source="scheduler",
+    )
+
+
 async def cancel(session: AsyncSession, task: Task, actor: User, reason: str | None = None) -> None:
-    _require(task.status != TaskStatus.DONE, "Выполненное поручение отменить нельзя.")
+    _require(
+        task.status not in (TaskStatus.DONE, TaskStatus.CANCELLED),
+        "Поручение уже закрыто.",
+    )
     before = task.status
     task.status = TaskStatus.CANCELLED
     task.cancelled_at = utcnow()
@@ -482,6 +517,10 @@ async def decide_extension(
         before_due = task.due_at
         task.due_at = extension.new_due_at
         task.extensions_count += 1
+        # Новый срок начинает цикл контроля заново: иначе поднятая ступень
+        # эскалации молчала бы о повторной просрочке, и продление превращалось бы
+        # в способ навсегда избавиться от напоминаний.
+        task.escalation_level = 0
         if task.status == TaskStatus.OVERDUE:
             task.status = TaskStatus.IN_PROGRESS
         await add_event(
@@ -603,17 +642,26 @@ async def my_tasks(
     return list(rows.scalars().all())
 
 
-async def control_counters(session: AsyncSession, user: User, scope_all: bool) -> dict[str, int]:
+async def control_counters(
+    session: AsyncSession,
+    user: User,
+    scope_all: bool,
+    department_ids: set[int] | None = None,
+) -> dict[str, int]:
     """Сводка для раздела «Контроль»."""
     base = select(func.count(Task.id)).where(Task.organization_id == user.organization_id)
     if not scope_all:
-        base = base.where(
-            or_(
-                Task.creator_id == user.id,
-                Task.on_behalf_of_id == user.id,
-                Task.reviewer_id == user.id,
-            )
+        mine = or_(
+            Task.creator_id == user.id,
+            Task.on_behalf_of_id == user.id,
+            Task.reviewer_id == user.id,
         )
+        # Начальник отдела отвечает за своё подразделение целиком, а не только
+        # за то, что создал сам: без этой ветки «Контроль» показывал ему
+        # неполные цифры - ровно по той роли, ради которой раздел и нужен.
+        if department_ids:
+            mine = or_(mine, Task.department_id.in_(department_ids))
+        base = base.where(mine)
 
     async def count(*conditions) -> int:
         return await session.scalar(base.where(*conditions)) or 0
@@ -631,13 +679,15 @@ async def control_counters(session: AsyncSession, user: User, scope_all: bool) -
 
 async def find_assignee(session: AsyncSession, organization_id: int, query: str) -> list[User]:
     """Поиск исполнителя по части имени."""
-    pattern = f"%{query.strip().lower()}%"
+    # Экранируем шаблонные символы: иначе поиск по «%» вернёт всех подряд.
+    escaped = query.strip().lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
     rows = await session.execute(
         select(User)
         .where(
             User.organization_id == organization_id,
             User.status == "ACTIVE",
-            func.lower(User.full_name).like(pattern),
+            func.lower(User.full_name).like(pattern, escape="\\"),
         )
         .order_by(User.full_name)
         .limit(10)
@@ -665,6 +715,7 @@ async def _notify(
     await enqueue(
         session,
         user_id=user_id,
+        organization_id=recipient.organization_id if recipient else None,
         event_key=event_key,
         kind=kind,
         priority=priority,

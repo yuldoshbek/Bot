@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.text import esc
 from app.core.timeutil import fmt_time, utcnow
-from app.models.enums import Availability
+from app.models.enums import Availability, UserStatus
 from app.models.schedule import AvailabilityLog, AvailabilityState
 from app.models.user import User
 from app.services.audit import write_audit
@@ -196,6 +196,7 @@ async def open_executives(session: AsyncSession, organization_id: int) -> list[t
         .join(AvailabilityState, AvailabilityState.user_id == User.id)
         .where(
             User.organization_id == organization_id,
+            User.status == UserStatus.ACTIVE,
             AvailabilityState.state == Availability.OPEN,
             AvailabilityState.visible_to_all.is_(True),
         )

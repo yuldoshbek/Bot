@@ -11,6 +11,12 @@ from app.models.base import Base, PKMixin
 class AuditLog(Base, PKMixin):
     __tablename__ = "audit_log"
 
+    # Журнал читают выборкой по времени, без привязки к человеку, поэтому
+    # организация хранится здесь: без неё администратор одной организации
+    # увидел бы действия другой.
+    organization_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     actor_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )

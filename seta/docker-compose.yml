@@ -2,6 +2,20 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Настройки по умолчанию рассчитаны на 1 ГБ памяти. На сервере 8 ГБ это
+    # прямой резерв производительности, который не стоит ничего.
+    command:
+      - postgres
+      - -c
+      - max_connections=150
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=4GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -53,6 +67,20 @@ services:
     restart: unless-stopped
     volumes:
       - ./storage:/app/storage
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    # Копия сразу при запуске, дальше раз в сутки. Спать между копиями дешевле,
+    # чем тащить в проект планировщик ради одной задачи.
+    entrypoint: ["sh", "-c", "while true; do sh /backup.sh || echo 'копия не удалась'; sleep 86400; done"]
 
   worker:
     build: .

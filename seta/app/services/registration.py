@@ -21,7 +21,7 @@ from app.models.org import Department, Organization
 from app.models.rbac import Role, UserRole
 from app.models.user import Invite, User
 from app.services.audit import write_audit
-from app.services.bootstrap import ensure_default_working_hours, grant_role
+from app.services.bootstrap import ensure_default_working_hours, grant_role, revoke_all_roles
 from app.services.rbac import ELEVATED_ROLES
 
 INVITE_TTL_HOURS = 72
@@ -96,6 +96,19 @@ async def get_user_by_telegram_id(session: AsyncSession, telegram_user_id: int) 
     ).scalar_one_or_none()
 
 
+async def is_empty_organization(session: AsyncSession, organization_id: int) -> bool:
+    """Нет ли в организации вообще ни одного сотрудника.
+
+    Именно пустота, а не отсутствие ACTIVE-администратора: иначе приостановка
+    единственного администратора открывала бы следующему вошедшему возможность
+    выдать себе любую роль.
+    """
+    count = await session.scalar(
+        select(func.count(User.id)).where(User.organization_id == organization_id)
+    )
+    return not count
+
+
 async def has_any_admin(session: AsyncSession, organization_id: int) -> bool:
     """Есть ли в организации хотя бы один действующий администратор."""
     count = await session.scalar(
@@ -139,10 +152,16 @@ async def start_registration(
 
     # Пустая система: подтверждать заявку некому. Первый вошедший становится
     # администратором - иначе система замыкается сама на себе и в неё не войти.
-    # Условие проверяется до создания записи и срабатывает ровно один раз.
-    is_first_admin = not await has_any_admin(session, organization.id)
+    # Условие - именно пустая организация, а не отсутствие активного админа:
+    # приостановка единственного администратора не должна открывать эту дверь.
+    is_first_admin = await is_empty_organization(session, organization.id)
     if is_first_admin:
         auto_approve = True
+        # Повышенную роль первый вошедший себе не выдаёт: он получает права
+        # администратора, чтобы запустить систему, и роль рядового сотрудника.
+        # Роль руководителя ему назначит человек - пусть даже он сам, но осознанно.
+        if effective_role in ELEVATED_ROLES:
+            effective_role = RoleCode.EMPLOYEE
 
     user = User(
         organization_id=organization.id,
@@ -195,9 +214,18 @@ async def approve_user(
     user: User,
     role: RoleCode,
     approved_by: int,
+    replace_roles: bool = True,
 ) -> None:
+    """Подтверждает доступ и назначает роль.
+
+    По умолчанию роль именно назначается, а не добавляется: кнопка «Изменить роль»
+    должна менять роль, иначе у человека накопятся две и права окажутся шире
+    выбранной - load_grants берёт наибольшую область из всех.
+    """
     before = {"status": user.status, "requested_role": user.requested_role}
     user.status = UserStatus.ACTIVE
+    if replace_roles:
+        await revoke_all_roles(session, user)
     await grant_role(session, user, role, granted_by=approved_by)
     await write_audit(
         session,

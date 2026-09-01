@@ -6,11 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import settings
 
+# Пул небольшой намеренно: соединение держится всё время обработки апдейта,
+# включая обращения к Telegram. При замедлении Telegram большой пул не спасает,
+# а исчерпывает лимит соединений базы. Короткий таймаут честнее долгого зависания.
 engine = create_async_engine(
     settings.database_url,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=8,
+    max_overflow=8,
+    pool_timeout=10,
+    pool_recycle=1800,
     echo=False,
 )
 
