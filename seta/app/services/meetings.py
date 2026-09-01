@@ -26,8 +26,12 @@ from app.core.dates import parse_hhmm
 from app.core.text import esc
 from app.core.timeutil import to_local, utcnow
 from app.models import (
+    Meeting,
+    MeetingParticipant,
     MeetingRequest,
+    MeetingStatus,
     NotificationPriority,
+    ParticipantRole,
     RequestStatus,
     SlotHold,
     User,
@@ -36,6 +40,7 @@ from app.models import (
 from app.services import slots as slot_service
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
+from app.services.rbac import can_access_object, has_permission, load_grants
 
 # Меньше этого удерживать бессмысленно: человек не успеет даже прочитать заявку.
 MIN_HOLD_MINUTES = 30
@@ -300,3 +305,358 @@ async def pending_for(session: AsyncSession, owner: User) -> list[MeetingRequest
             )
         ).scalars().all()
     )
+
+
+# ── Жизненный цикл встречи ──────────────────────────────────────────────────
+@dataclass
+class Result:
+    """Исход действия над встречей.
+
+    Причина отказа — обычный ответ, а не исключение: «время только что заняли»
+    и «это не ваша встреча» человек должен прочитать, а не увидеть сбой.
+    """
+
+    meeting: Meeting | None = None
+    reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.meeting is not None
+
+
+async def _may(
+    session: AsyncSession,
+    actor: User,
+    permission: str,
+    *,
+    owner_id: int,
+    related: set[int] | None = None,
+    department_id: int | None = None,
+) -> bool:
+    """Право есть и открыто именно к этой встрече."""
+    grants = await load_grants(session, actor)
+    if not has_permission(grants, permission):
+        return False
+    return await can_access_object(
+        session, actor, grants, permission,
+        owner_id=owner_id, related_user_ids=related, department_id=department_id,
+    )
+
+
+async def participants_of(session: AsyncSession, meeting: Meeting) -> list[User]:
+    """Все, кого встреча касается. Владелец среди них — он организатор."""
+    return list(
+        (
+            await session.execute(
+                select(User)
+                .join(MeetingParticipant, MeetingParticipant.user_id == User.id)
+                .where(MeetingParticipant.meeting_id == meeting.id)
+            )
+        ).scalars().all()
+    )
+
+
+async def _tell_everyone(
+    session: AsyncSession,
+    meeting: Meeting,
+    *,
+    key: str,
+    kind: str,
+    header: str,
+    tail: str = "",
+    priority: NotificationPriority = NotificationPriority.NORMAL,
+    skip_id: int | None = None,
+) -> int:
+    """Одно событие — по письму каждому участнику.
+
+    Ключ события общий для всех, различается только получателем: повторное
+    нажатие кнопки не рассылает второй круг писем, за это отвечает
+    уникальность `event_key` в схеме.
+    """
+    sent = 0
+    for person in await participants_of(session, meeting):
+        if person.id == skip_id:
+            continue
+        when = to_local(meeting.start_at, person.timezone).strftime("%d.%m в %H:%M")
+        created = await enqueue(
+            session,
+            user_id=person.id,
+            organization_id=meeting.organization_id,
+            event_key=f"{key}:u{person.id}",
+            kind=kind,
+            priority=priority,
+            body=f"{header}\n\n{esc(meeting.title)}\nКогда: {when}{tail}",
+            payload={"meeting_id": meeting.id},
+            timezone_name=person.timezone,
+        )
+        sent += int(created)
+    return sent
+
+
+async def approve(
+    session: AsyncSession,
+    *,
+    request: MeetingRequest,
+    actor: User,
+    now: datetime | None = None,
+) -> Result:
+    """Подтверждает заявку и превращает её во встречу."""
+    now = now or utcnow()
+    if request.status != RequestStatus.NEW:
+        return Result(reason="Решение по этой заявке уже принято.")
+    if actor.organization_id != request.organization_id:
+        return Result(reason="Заявка другой организации.")
+    if not await _may(
+        session, actor, "meeting.approve",
+        owner_id=request.owner_id, related={request.initiator_id},
+    ):
+        return Result(reason="Подтверждать встречи может руководитель или его ассистент.")
+
+    # Удержание защищало окно от заявок, но не от встречи, созданной напрямую.
+    # Решает база: пересечение в календаре владельца физически невозможно.
+    savepoint = await session.begin_nested()
+    try:
+        meeting = Meeting(
+            organization_id=request.organization_id,
+            owner_id=request.owner_id,
+            title=request.title,
+            start_at=request.start_at,
+            end_at=request.end_at,
+            status=MeetingStatus.CONFIRMED,
+            created_by=actor.id,
+            on_behalf_of_id=request.owner_id if actor.id != request.owner_id else None,
+            request_id=request.id,
+        )
+        session.add(meeting)
+        await session.flush()
+    except IntegrityError:
+        await savepoint.rollback()
+        return Result(reason="Это время в календаре уже занято другой встречей.")
+
+    for user_id, role in (
+        (request.owner_id, ParticipantRole.ORGANIZER),
+        (request.initiator_id, ParticipantRole.REQUIRED),
+    ):
+        session.add(MeetingParticipant(
+            meeting_id=meeting.id, user_id=user_id, role=role, created_at=now
+        ))
+
+    request.status = RequestStatus.APPROVED
+    request.decided_by = actor.id
+    request.decided_at = now
+    request.meeting_id = meeting.id
+    await _release_hold(session, request.id, now)
+    await session.flush()
+
+    await _tell_everyone(
+        session, meeting,
+        key=f"meeting:{meeting.id}:confirmed",
+        kind="meeting.confirmed",
+        header="✅ <b>Встреча подтверждена</b>",
+    )
+    await write_audit(
+        session, actor_id=actor.id, action="meeting.request.approve",
+        entity_type="meeting", entity_id=meeting.id,
+        after={"request_id": request.id, "start_at": meeting.start_at.isoformat()},
+    )
+    return Result(meeting=meeting)
+
+
+async def reschedule(
+    session: AsyncSession,
+    *,
+    meeting: Meeting,
+    actor: User,
+    new_start: datetime,
+    reason: str,
+    now: datetime | None = None,
+) -> Result:
+    """Переносит встречу и объясняет участникам, почему.
+
+    Перенос без причины не принимается: получить «встреча теперь в 17:00»
+    без объяснения — худший вид уведомления.
+    """
+    now = now or utcnow()
+    reason = (reason or "").strip()
+    if not reason:
+        return Result(reason="Нужна причина переноса — её увидят все участники.")
+    if meeting.status == MeetingStatus.CANCELLED:
+        return Result(reason="Встреча отменена, переносить нечего.")
+    if actor.organization_id != meeting.organization_id:
+        return Result(reason="Встреча другой организации.")
+
+    people = await participants_of(session, meeting)
+    if not await _may(
+        session, actor, "meeting.reschedule",
+        owner_id=meeting.owner_id, related={p.id for p in people},
+    ):
+        return Result(reason="Переносить встречу может руководитель или его ассистент.")
+
+    duration = meeting.end_at - meeting.start_at
+    new_end = new_start + duration
+    if new_start <= now:
+        return Result(reason="Это время уже прошло.")
+    owner = await session.get(User, meeting.owner_id)
+    if owner is None:
+        return Result(reason="Владелец календаря не найден.")
+    if not await slot_service.is_free(
+        session, owner=owner, start_at=new_start, end_at=new_end,
+        exclude_meeting_id=meeting.id,
+    ):
+        return Result(reason="В это время у руководителя уже что-то стоит.")
+
+    savepoint = await session.begin_nested()
+    try:
+        meeting.start_at = new_start
+        meeting.end_at = new_end
+        meeting.reschedule_count += 1
+        await session.flush()
+    except IntegrityError:
+        await savepoint.rollback()
+        return Result(reason="Это время только что заняли.")
+
+    # Номер переноса в ключе: второй перенос — это новое событие, о нём
+    # обязаны сообщить. Без версии повтор считался бы уже отправленным.
+    await _tell_everyone(
+        session, meeting,
+        key=f"meeting:{meeting.id}:moved:{meeting.reschedule_count}",
+        kind="meeting.rescheduled",
+        header="🔄 <b>Встреча перенесена</b>",
+        tail=f"\n\nПричина: {esc(reason)}",
+    )
+    await write_audit(
+        session, actor_id=actor.id, action="meeting.reschedule",
+        entity_type="meeting", entity_id=meeting.id,
+        after={"start_at": new_start.isoformat()}, reason=reason,
+    )
+    return Result(meeting=meeting)
+
+
+async def cancel(
+    session: AsyncSession,
+    *,
+    meeting: Meeting,
+    actor: User,
+    reason: str,
+    now: datetime | None = None,
+) -> Result:
+    """Отменяет встречу. Время сразу возвращается в оборот."""
+    now = now or utcnow()
+    reason = (reason or "").strip()
+    if not reason:
+        return Result(reason="Нужна причина отмены — её увидят все участники.")
+    if meeting.status == MeetingStatus.CANCELLED:
+        return Result(reason="Встреча уже отменена.")
+    if actor.organization_id != meeting.organization_id:
+        return Result(reason="Встреча другой организации.")
+
+    people = await participants_of(session, meeting)
+    if not await _may(
+        session, actor, "meeting.cancel",
+        owner_id=meeting.owner_id, related={p.id for p in people},
+    ):
+        return Result(reason="Отменять встречу может руководитель или его ассистент.")
+
+    meeting.status = MeetingStatus.CANCELLED
+    meeting.cancelled_at = now
+    meeting.cancel_reason = reason[:500]
+    await session.flush()
+
+    await _tell_everyone(
+        session, meeting,
+        key=f"meeting:{meeting.id}:cancelled",
+        kind="meeting.cancelled",
+        header="🚫 <b>Встреча отменена</b>",
+        tail=f"\n\nПричина: {esc(reason)}",
+    )
+    await write_audit(
+        session, actor_id=actor.id, action="meeting.cancel",
+        entity_type="meeting", entity_id=meeting.id, reason=reason,
+    )
+    return Result(meeting=meeting)
+
+
+async def quick(
+    session: AsyncSession,
+    *,
+    organizer: User,
+    participant_ids: list[int],
+    title: str,
+    start_at: datetime,
+    duration_minutes: int = 30,
+    now: datetime | None = None,
+) -> Result:
+    """Быстрое совещание: три поля и рассылка.
+
+    Заявок и подтверждений здесь нет — это инструмент того, кто и так вправе
+    собрать людей. Уведомление уходит как срочное: совещание через двадцать
+    минут, доставленное после тихих часов, бессмысленно.
+    """
+    now = now or utcnow()
+    title = (title or "").strip()
+    if not title:
+        return Result(reason="Нужна тема совещания.")
+    if start_at <= now:
+        return Result(reason="Это время уже прошло.")
+    if not await _may(
+        session, organizer, "meeting.create", owner_id=organizer.id
+    ):
+        return Result(reason="Нет права создавать встречи.")
+
+    end_at = start_at + timedelta(minutes=duration_minutes)
+    people = list(
+        (
+            await session.execute(
+                select(User).where(
+                    User.id.in_(set(participant_ids) - {organizer.id}),
+                    User.organization_id == organizer.organization_id,
+                )
+            )
+        ).scalars().all()
+    )
+    if not people:
+        return Result(reason="Некого собирать: участники не найдены в вашей организации.")
+
+    savepoint = await session.begin_nested()
+    try:
+        meeting = Meeting(
+            organization_id=organizer.organization_id,
+            owner_id=organizer.id,
+            title=title[:300],
+            start_at=start_at,
+            end_at=end_at,
+            status=MeetingStatus.CONFIRMED,
+            created_by=organizer.id,
+        )
+        session.add(meeting)
+        await session.flush()
+    except IntegrityError:
+        await savepoint.rollback()
+        return Result(reason="В это время у вас уже стоит другая встреча.")
+
+    session.add(MeetingParticipant(
+        meeting_id=meeting.id, user_id=organizer.id,
+        role=ParticipantRole.ORGANIZER, created_at=now,
+    ))
+    for person in people:
+        session.add(MeetingParticipant(
+            meeting_id=meeting.id, user_id=person.id,
+            role=ParticipantRole.REQUIRED, created_at=now,
+        ))
+    await session.flush()
+
+    await _tell_everyone(
+        session, meeting,
+        key=f"meeting:{meeting.id}:called",
+        kind="meeting.quick",
+        header="📣 <b>Срочное совещание</b>",
+        tail=f"\n\nСобирает: {esc(organizer.full_name)}",
+        priority=NotificationPriority.CRITICAL,
+        skip_id=organizer.id,
+    )
+    await write_audit(
+        session, actor_id=organizer.id, action="meeting.quick",
+        entity_type="meeting", entity_id=meeting.id,
+        after={"participants": [p.id for p in people]},
+    )
+    return Result(meeting=meeting)

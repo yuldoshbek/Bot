@@ -48,7 +48,14 @@ from app.models import (
     UserStatus,
     WorkingHours,
 )
-from app.models.enums import AbsenceKind, Availability, RequestStatus, RoleCode
+from app.models.enums import (
+    AbsenceKind,
+    Availability,
+    NotificationPriority,
+    ParticipantRole,
+    RequestStatus,
+    RoleCode,
+)
 from app.services import meetings, slots as slot_service
 from app.services.availability import set_state
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
@@ -695,7 +702,303 @@ async def main() -> None:
         second_pass = await meetings.expire_holds(session)
         check(second_pass == 0, "второй проход не находит уже снятых")
 
-    print("\n18. Уборка не трогает боевые данные")
+    print("\n18. Подтверждение заявки")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        day = MONDAY + timedelta(days=24)
+
+        outcome = await meetings.create_request(
+            session, initiator=worker, owner=chief,
+            start_at=at(day, 11), duration_minutes=30, title="ТЕСТ подтверждение",
+        )
+        check(outcome.ok, "заявка создана", outcome.reason or "")
+        request = outcome.request
+
+        denied = await meetings.approve(session, request=request, actor=worker)
+        check(not denied.ok, "сотрудник не подтверждает заявку сам себе", denied.reason or "")
+        check(
+            request.status == RequestStatus.NEW,
+            "и заявка от этого не меняется",
+        )
+
+        done = await meetings.approve(session, request=request, actor=chief)
+        check(done.ok, "руководитель подтверждает", done.reason or "")
+        meeting_id = done.meeting.id
+        check(done.meeting.status == MeetingStatus.CONFIRMED, "встреча подтверждена")
+        check(request.status == RequestStatus.APPROVED, "заявка закрыта подтверждением")
+        check(request.meeting_id == meeting_id, "заявка и встреча связаны")
+
+        people = await session.scalar(
+            select(func.count(MeetingParticipant.id)).where(
+                MeetingParticipant.meeting_id == meeting_id
+            )
+        )
+        check(people == 2, "участников двое: руководитель и инициатор", f"их {people}")
+        held = await session.scalar(
+            select(func.count(SlotHold.id)).where(
+                SlotHold.request_id == request.id, SlotHold.released_at.is_(None)
+            )
+        )
+        check(held == 0, "удержание снято — его заменила сама встреча", f"осталось {held}")
+        told = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key.like(f"meeting:{meeting_id}:confirmed:%")
+            )
+        )
+        check(told == 2, "о подтверждении узнали оба", f"писем: {told}")
+
+        twice = await meetings.approve(session, request=request, actor=chief)
+        check(not twice.ok, "повторное подтверждение ничего не создаёт", twice.reason or "")
+
+    print("\n19. Перенос")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        meeting = await session.get(Meeting, meeting_id)
+        day = MONDAY + timedelta(days=24)
+
+        no_reason = await meetings.reschedule(
+            session, meeting=meeting, actor=chief, new_start=at(day, 16), reason="  ",
+        )
+        check(not no_reason.ok, "перенос без причины не принимается", no_reason.reason or "")
+        check(meeting.start_at == at(day, 11), "время осталось прежним")
+
+        not_yours = await meetings.reschedule(
+            session, meeting=meeting, actor=worker,
+            new_start=at(day, 16), reason="Мне так удобнее",
+        )
+        check(not not_yours.ok, "сотрудник не переносит чужую встречу", not_yours.reason or "")
+        check(meeting.start_at == at(day, 11), "и время опять не изменилось")
+
+        moved = await meetings.reschedule(
+            session, meeting=meeting, actor=chief,
+            new_start=at(day, 16), reason="Совещание у директора",
+        )
+        check(moved.ok, "руководитель переносит", moved.reason or "")
+        check(meeting.start_at == at(day, 16), "время изменилось")
+        check(meeting.reschedule_count == 1, "перенос сосчитан")
+        told = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key.like(f"meeting:{meeting_id}:moved:1:%")
+            )
+        )
+        check(told == 2, "о переносе узнали все участники", f"писем: {told}")
+        body = await session.scalar(
+            select(Notification.body).where(
+                Notification.event_key.like(f"meeting:{meeting_id}:moved:1:%")
+            ).limit(1)
+        )
+        check("Совещание у директора" in body, "и причина в письме есть")
+
+        past = await meetings.reschedule(
+            session, meeting=meeting, actor=chief,
+            new_start=at(MONDAY - timedelta(days=10), 11), reason="Назад во времени",
+        )
+        check(not past.ok, "перенос в прошлое не проходит", past.reason or "")
+
+        blocker = await busy(session, chief, at(day, 9), at(day, 10), "ТЕСТ занято")
+        onto_busy = await meetings.reschedule(
+            session, meeting=meeting, actor=chief,
+            new_start=at(day, 9, 15), reason="Поверх другой встречи",
+        )
+        check(not onto_busy.ok, "перенос на занятое время не проходит", onto_busy.reason or "")
+        check(meeting.reschedule_count == 1, "и счётчик переносов не вырос")
+
+    print("\n20. Отмена")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        meeting = await session.get(Meeting, meeting_id)
+
+        empty = await meetings.cancel(session, meeting=meeting, actor=chief, reason="")
+        check(not empty.ok, "отмена без причины не принимается", empty.reason or "")
+        stranger = await meetings.cancel(
+            session, meeting=meeting, actor=worker, reason="Передумал",
+        )
+        check(not stranger.ok, "сотрудник не отменяет чужую встречу", stranger.reason or "")
+        check(meeting.status == MeetingStatus.CONFIRMED, "встреча всё ещё в силе")
+
+        killed = await meetings.cancel(
+            session, meeting=meeting, actor=chief, reason="Командировка",
+        )
+        check(killed.ok, "руководитель отменяет", killed.reason or "")
+        check(meeting.status == MeetingStatus.CANCELLED, "встреча отменена")
+        told = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key.like(f"meeting:{meeting_id}:cancelled:%")
+            )
+        )
+        check(told == 2, "об отмене узнали все", f"писем: {told}")
+        check(
+            await slot_service.is_free(
+                session, owner=chief, start_at=meeting.start_at, end_at=meeting.end_at
+            ),
+            "время отменённой встречи снова свободно",
+        )
+
+        again = await meetings.cancel(session, meeting=meeting, actor=chief, reason="Ещё раз")
+        check(not again.ok, "повторная отмена ничего не меняет", again.reason or "")
+        told_again = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key.like(f"meeting:{meeting_id}:cancelled:%")
+            )
+        )
+        check(told_again == 2, "и второго круга писем нет", f"писем: {told_again}")
+
+        moved_dead = await meetings.reschedule(
+            session, meeting=meeting, actor=chief,
+            new_start=at(MONDAY + timedelta(days=25), 11), reason="Верните",
+        )
+        check(not moved_dead.ok, "отменённую встречу не перенести", moved_dead.reason or "")
+
+    print("\n21. Быстрое совещание")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        worker = await session.get(User, worker_id)
+        others = [
+            row[0] for row in (
+                await session.execute(
+                    select(User.id).where(
+                        User.organization_id == org_id, User.id.notin_([chief_id])
+                    ).order_by(User.id).limit(3)
+                )
+            ).all()
+        ]
+        day = MONDAY + timedelta(days=26)
+
+        nameless = await meetings.quick(
+            session, organizer=chief, participant_ids=others,
+            title="   ", start_at=at(day, 12),
+        )
+        check(not nameless.ok, "совещание без темы не собрать", nameless.reason or "")
+
+        nobody = await meetings.quick(
+            session, organizer=chief, participant_ids=[chief_id],
+            title="ТЕСТ сам с собой", start_at=at(day, 12),
+        )
+        check(not nobody.ok, "совещание из одного организатора не собрать", nobody.reason or "")
+
+        called = await meetings.quick(
+            session, organizer=chief, participant_ids=others,
+            title="ТЕСТ планёрка", start_at=at(day, 12), duration_minutes=20,
+        )
+        check(called.ok, "совещание собрано", called.reason or "")
+        quick_id = called.meeting.id
+        count = await session.scalar(
+            select(func.count(MeetingParticipant.id)).where(
+                MeetingParticipant.meeting_id == quick_id
+            )
+        )
+        check(count == len(others) + 1, "все приглашены плюс организатор", f"их {count}")
+        told = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key.like(f"meeting:{quick_id}:called:%")
+            )
+        )
+        check(told == len(others), "письма ушли всем, кроме организатора", f"писем: {told}")
+        urgent = await session.scalar(
+            select(Notification.priority).where(
+                Notification.event_key.like(f"meeting:{quick_id}:called:%")
+            ).limit(1)
+        )
+        check(
+            urgent == NotificationPriority.CRITICAL,
+            "и уходят как срочные — тихие часы им не помеха",
+            f"приоритет: {urgent}",
+        )
+
+        stranger_org = (
+            await session.execute(
+                select(Organization.id).where(Organization.name == f"{TEST_ORG_PREFIX}Чужая")
+            )
+        ).scalar_one()
+        stranger_id = (
+            await session.execute(
+                select(User.id).where(User.organization_id == stranger_org).limit(1)
+            )
+        ).scalar_one()
+        mixed = await meetings.quick(
+            session, organizer=chief, participant_ids=[*others, stranger_id],
+            title="ТЕСТ с чужаком", start_at=at(day, 15),
+        )
+        check(mixed.ok, "совещание с чужаком в списке всё же собирается", mixed.reason or "")
+        invited = [
+            row[0] for row in (
+                await session.execute(
+                    select(MeetingParticipant.user_id).where(
+                        MeetingParticipant.meeting_id == mixed.meeting.id
+                    )
+                )
+            ).all()
+        ]
+        check(stranger_id not in invited, "но человек из другой организации не приглашён")
+
+    print("\n22. Двойное нажатие")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        chief = await session.get(User, chief_id)
+        day = MONDAY + timedelta(days=27)
+        target = await busy(session, chief, at(day, 10), at(day, 11), "ТЕСТ двойное нажатие")
+        session.add(MeetingParticipant(
+            meeting_id=target.id, user_id=chief_id,
+            role=ParticipantRole.ORGANIZER, created_at=utcnow(),
+        ))
+        session.add(MeetingParticipant(
+            meeting_id=target.id, user_id=worker_id,
+            role=ParticipantRole.REQUIRED, created_at=utcnow(),
+        ))
+        await session.flush()
+        double_id = target.id
+
+        # Проверка самого замка, а не раннего возврата по статусу: повторная
+        # рассылка с тем же ключом события не должна создать ни одного письма.
+        first = await meetings._tell_everyone(
+            session, target, key=f"meeting:{double_id}:probe",
+            kind="meeting.probe", header="Проверка",
+        )
+        second = await meetings._tell_everyone(
+            session, target, key=f"meeting:{double_id}:probe",
+            kind="meeting.probe", header="Проверка",
+        )
+        check(first == 2, "первая рассылка дошла до обоих", f"писем: {first}")
+        check(second == 0, "повторная с тем же ключом не создаёт ничего", f"писем: {second}")
+
+    # Два одновременных нажатия «Отменить»: проверка статуса их не разведёт,
+    # обе транзакции видят встречу подтверждённой.
+    tap_barrier = asyncio.Barrier(2)
+
+    async def tap_cancel() -> bool:
+        async with session_scope() as s:
+            actor = await s.get(User, (await test_people(s))[1])
+            meeting = await s.get(Meeting, double_id)
+            await tap_barrier.wait()
+            result = await meetings.cancel(
+                s, meeting=meeting, actor=actor, reason="Двойное нажатие",
+            )
+            return result.ok
+
+    taps = await asyncio.gather(tap_cancel(), tap_cancel(), return_exceptions=True)
+    broke = [r for r in taps if isinstance(r, BaseException)]
+    check(not broke, "одновременная отмена не падает", f"{broke[:1]}")
+
+    async with session_scope() as session:
+        letters = await session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.event_key.like(f"meeting:{double_id}:cancelled:%")
+            )
+        )
+        state = await session.scalar(
+            select(Meeting.status).where(Meeting.id == double_id)
+        )
+        check(state == MeetingStatus.CANCELLED, "встреча отменена", f"состояние: {state}")
+        check(letters == 2, "письмо каждому участнику ровно одно", f"писем: {letters}")
+
+    print("\n23. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(
