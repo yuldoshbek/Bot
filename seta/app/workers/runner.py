@@ -3,13 +3,14 @@
 Отдельный процесс, а не поток внутри бота: бот должен отвечать Telegram за
 секунды и не зависеть от того, сколько сейчас рассылается сообщений.
 
-Четыре цикла с разной частотой:
+Пять циклов с разной частотой:
   доставка  - каждые 3 секунды (цель по задержке очереди: не больше 5 секунд);
   сроки     - раз в минуту;
   встречи   - раз в минуту: удержания, досье за полчаса, отметка за пять минут;
+  сводки    - раз в минуту: утренняя сводка в 07:30 по месту получателя;
   документы - раз в полминуты: достаёт текст из загруженных файлов.
 
-Оба защищены распределённой блокировкой в Redis: даже если запустить второй
+Все защищены распределённой блокировкой в Redis: даже если запустить второй
 обработчик, одно напоминание уйдёт один раз.
 """
 import asyncio
@@ -17,7 +18,7 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
-from app.services import attendance, briefing, deadlines, indexer, meetings
+from app.services import attendance, briefing, deadlines, digest, indexer, meetings
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
 
@@ -31,6 +32,7 @@ log = logging.getLogger("seta.worker")
 DELIVERY_INTERVAL = 3
 DEADLINE_INTERVAL = 60
 MEETING_INTERVAL = 60
+DIGEST_INTERVAL = 60
 INDEX_INTERVAL = 30
 
 
@@ -107,6 +109,31 @@ async def meeting_loop() -> None:
         await asyncio.sleep(MEETING_INTERVAL)
 
 
+async def digest_loop() -> None:
+    """Утренняя сводка. Проход каждую минуту, отправка — по местному времени.
+
+    Час сервера здесь ни при чём: 07:30 наступает у каждого получателя своё,
+    и проход обязан смотреть на его пояс. Повторные проходы внутри окна
+    безопасны — ключ события содержит местную дату, и вторая сводка
+    отбрасывается уникальностью в схеме.
+    """
+    while True:
+        try:
+            await beat("worker:digest")
+            if await acquire_lock("digest:morning", ttl_seconds=DIGEST_INTERVAL * 2):
+                try:
+                    async with session_scope() as session:
+                        sent = await digest.send_digests(session)
+                    if sent:
+                        log.info("утренних сводок поставлено: %s", sent)
+                finally:
+                    await release_lock("digest:morning")
+        except Exception as error:
+            log.exception("сбой утренней сводки")
+            await record_error(error, source="worker", context="утренняя сводка")
+        await asyncio.sleep(DIGEST_INTERVAL)
+
+
 async def index_loop() -> None:
     """Извлечение текста из документов.
 
@@ -143,7 +170,10 @@ async def index_loop() -> None:
 async def main() -> None:
     log.info("Фоновый обработчик запущен")
     try:
-        await asyncio.gather(delivery_loop(), deadline_loop(), meeting_loop(), index_loop())
+        await asyncio.gather(
+            delivery_loop(), deadline_loop(), meeting_loop(),
+            digest_loop(), index_loop(),
+        )
     finally:
         from app.bot.loader import bot
 

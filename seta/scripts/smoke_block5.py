@@ -14,7 +14,7 @@
 """
 import asyncio
 import sys
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -56,7 +56,7 @@ from app.models.enums import (
     RoleCode,
     TaskEventKind,
 )
-from app.services import analytics, dashboard
+from app.services import analytics, dashboard, digest
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
 
@@ -92,6 +92,11 @@ def at(day: date, hour: int, minute: int = 0) -> datetime:
 
 def find(metrics, key):
     return next(m for m in metrics if m.key == key)
+
+
+def to_local_date_utc(moment: datetime) -> str:
+    """Дата того же момента по серверу — для сверки с местной датой получателя."""
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
 async def cleanup() -> None:
@@ -133,6 +138,9 @@ async def cleanup() -> None:
             await session.execute(
                 delete(MeetingRequest).where(MeetingRequest.owner_id.in_(user_ids))
             )
+        await session.execute(
+            delete(Notification).where(Notification.organization_id.in_(org_ids))
+        )
         await session.execute(delete(Decision).where(Decision.organization_id.in_(org_ids)))
         await session.execute(delete(Task).where(Task.organization_id.in_(org_ids)))
         if meeting_ids:
@@ -781,7 +789,159 @@ async def stage_five() -> None:
             f"молчат {sum(1 for m in board.metrics if m.no_data)} из {len(board.metrics)}",
         )
 
-    print("\n22. Уборка не трогает боевые данные")
+    print("\n22. Утренняя сводка: одна в день, по месту получателя")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        # 07:30 по Ташкенту в тот день, где у руководителя есть встречи.
+        # В UTC — так же, как их подаёт фоновый цикл: подставлять местное время
+        # значит скрыть от проверки ошибку «дата сервера вместо местной».
+        morning = at(MONDAY, 7, 30).astimezone(timezone.utc)
+
+        check(digest.due_now(morning, "Asia/Tashkent"), "в 07:30 по месту сводка положена")
+        check(
+            not digest.due_now(at(MONDAY, 7, 0), "Asia/Tashkent"),
+            "в 07:00 ещё рано",
+        )
+        check(
+            not digest.due_now(at(MONDAY, 13, 0), "Asia/Tashkent"),
+            "после обеда сводка «на день» уже врёт и не уходит",
+        )
+
+        sent = await digest.send_digests(session, now=morning)
+        check(sent >= 1, "сводка поставлена в очередь", f"писем: {sent}")
+        again = await digest.send_digests(session, now=morning + timedelta(minutes=5))
+        check(again == 0, "второй проход в тот же день ничего не добавляет", f"{again}")
+
+        letters = (
+            await session.execute(
+                select(Notification).where(Notification.kind == "digest.morning")
+            )
+        ).scalars().all()
+        check(len(letters) == sent, "писем ровно столько, сколько сообщил проход",
+              f"{len(letters)} против {sent}")
+        for letter in letters:
+            check(
+                letter.event_key.endswith(morning.strftime("%Y-%m-%d")),
+                "ключ события содержит местную дату получателя",
+                letter.event_key,
+            )
+            break
+        # Тихие часы кончаются ровно в 07:30, и сводка не должна съезжать
+        # на следующее утро: иначе она приходила бы сутками позже.
+        for letter in letters:
+            check(
+                letter.scheduled_at <= morning + timedelta(minutes=1),
+                "тихие часы сводку не задерживают",
+                f"{letter.scheduled_at} против {morning}",
+            )
+            break
+
+        body = letters[0].body if letters else ""
+        check("Утро" in body, "письмо озаглавлено как утреннее", body[:40])
+        check(
+            "Мой день" not in body,
+            "и не подписано заголовком экрана",
+        )
+
+    print("\n23. Пустой день не рассылается")
+    async with session_scope() as session:
+        quiet_org = Organization(name=f"{TEST_ORG_PREFIX}Тихая", timezone="Asia/Tashkent")
+        session.add(quiet_org)
+        await session.flush()
+        lonely = await person(
+            session, quiet_org, "ТЕСТ Тихий", RoleCode.EXECUTIVE, 962_000_001
+        )
+        text, board = await digest.build_for(
+            session, viewer=lonely, now=at(MONDAY, 7, 30).astimezone(timezone.utc)
+        )
+        check(text is None, "сводки без событий нет вовсе", (text or "")[:60])
+        check(board.quiet, "и доска подтверждает, что день пустой")
+
+    print("\n24. Разные пояса не сдвигают сводку на сутки")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief = who["руководитель"]
+        far_org = Organization(name=f"{TEST_ORG_PREFIX}Западная", timezone="Europe/Moscow")
+        session.add(far_org)
+        await session.flush()
+        far_chief = User(
+            organization_id=far_org.id, telegram_user_id=963_000_001,
+            full_name="ТЕСТ Западный", status=UserStatus.ACTIVE,
+            timezone="Europe/Moscow", locale="ru",
+        )
+        session.add(far_chief)
+        await session.flush()
+        await ensure_default_working_hours(session, far_chief)
+        await grant_role(session, far_chief, RoleCode.EXECUTIVE)
+
+        # Один и тот же момент: 07:30 в Ташкенте — это 05:30 в Москве.
+        tashkent_morning = at(MONDAY, 7, 30).astimezone(timezone.utc)
+        check(
+            digest.due_now(tashkent_morning, "Asia/Tashkent"),
+            "ташкентскому получателю пора",
+        )
+        check(
+            not digest.due_now(tashkent_morning, "Europe/Moscow"),
+            "а московскому ещё нет: у него 05:30",
+        )
+        moscow_morning = tashkent_morning + timedelta(hours=2)
+        check(
+            digest.due_now(moscow_morning, "Europe/Moscow"),
+            "двумя часами позже пора и ему",
+        )
+        # Ключ считается по местной дате, а не по дате сервера. У Ташкента
+        # в 07:30 обе даты совпадают, и на нём эту ошибку не увидеть — нужен
+        # пояс, где 07:30 местного приходится на вчерашний день по UTC.
+        far_east = "Pacific/Auckland"
+        far_morning = datetime.combine(
+            MONDAY, time(7, 30), tzinfo=ZoneInfo(far_east)
+        ).astimezone(timezone.utc)
+        check(
+            to_local_date_utc(far_morning) != MONDAY.strftime("%Y-%m-%d"),
+            "нашли момент, где дата сервера и местная расходятся",
+            f"UTC {to_local_date_utc(far_morning)}, местная {MONDAY}",
+        )
+        check(
+            digest.local_date_key(far_morning, far_east) == MONDAY.strftime("%Y-%m-%d"),
+            "ключ берёт местную дату получателя, а не дату сервера",
+            digest.local_date_key(far_morning, far_east),
+        )
+        check(
+            digest.due_now(far_morning, far_east),
+            "и время сводки у него наступает по его же поясу",
+        )
+
+    print("\n25. Ассистент видит день руководителя, а не только свой")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief = who["руководитель"]
+        org = await session.get(Organization, chief.organization_id)
+        helper = await person(
+            session, org, "ТЕСТ Помощник", RoleCode.ASSISTANT, 964_000_001
+        )
+        text, _ = await digest.build_for(
+            session, viewer=helper, now=at(MONDAY, 7, 30).astimezone(timezone.utc)
+        )
+        check(text is not None, "ассистенту сводка собралась")
+        check(
+            "У руководителя сегодня" in (text or ""),
+            "и в ней есть блок про день руководителя",
+            (text or "")[-160:],
+        )
+        check(
+            "ТЕСТ Руководитель" in (text or ""),
+            "с именем руководителя",
+        )
+        chief_text, _ = await digest.build_for(
+            session, viewer=chief, now=at(MONDAY, 7, 30).astimezone(timezone.utc)
+        )
+        check(
+            "У руководителя сегодня" not in (chief_text or ""),
+            "а руководителю этот блок не нужен: состав сводок разный",
+        )
+
+    print("\n26. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

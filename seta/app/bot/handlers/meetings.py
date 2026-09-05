@@ -227,71 +227,6 @@ async def _card_text(
 
 
 # ── Мой день ────────────────────────────────────────────────────────────────
-def _day_text(board: dashboard.Board, tz: str) -> str:
-    """Экран одним сообщением. Пустой блок не рисуется вовсе.
-
-    Порядок блоков повторяет порядок вопросов из критерия готовности: что
-    сейчас, что дальше, что требует решения, что просрочено. Показатели идут
-    последними — они объясняют, а не требуют действия.
-    """
-    local = to_local(board.day, tz)
-    lines = [f"<b>Мой день · {local.strftime('%d.%m')}</b>", ""]
-
-    if board.running:
-        lines.append("<b>Сейчас</b>")
-        for m in board.running:
-            lines.append(f"🔴 {esc(m.title)} — до {to_local(m.end_at, tz):%H:%M}")
-        lines.append("")
-
-    if board.ahead:
-        lines.append("<b>Дальше</b>")
-        for m in board.ahead:
-            lines.append(f"🕐 {to_local(m.start_at, tz):%H:%M} {esc(m.title)}")
-    elif not board.running:
-        lines.append("Встреч на сегодня нет.")
-
-    if board.free_slot:
-        lines.append(f"🟢 Свободно с {to_local(board.free_slot.start, tz):%H:%M}")
-
-    if board.needs_decision:
-        lines += ["", "<b>Требует решения</b>"]
-        if board.requests_waiting:
-            tail = (
-                f", сверх лимита {board.requests_over_quota}"
-                if board.requests_over_quota
-                else ""
-            )
-            lines.append(f"📥 Заявок на встречу: {board.requests_waiting}{tail}")
-        if board.to_review:
-            lines.append(f"🔍 Ждут вашей проверки: {board.to_review}")
-        if board.stale_decisions:
-            lines.append(f"📌 Решений с прошедшим сроком: {board.stale_decisions}")
-
-    if board.overdue_total:
-        # Сводкой, а не поштучно: решение Р-10. Поимённо — только личный контроль.
-        lines += ["", f"<b>Просрочено: {board.overdue_total}</b>"]
-        for name, count in board.overdue_by_department:
-            lines.append(f"• {esc(name)}: {count}")
-        if board.overdue_other:
-            lines.append(f"• в остальных отделах: {board.overdue_other}")
-        if board.personal_overdue:
-            lines.append("")
-            lines.append("<b>На личном контроле</b>")
-            for task in board.personal_overdue:
-                lines.append(
-                    f"‼️ {esc(cut(task.title, 60))} — срок {fmt_dt(task.due_at, tz)}"
-                )
-
-    if board.metrics:
-        lines += ["", "<b>Показатели за 30 дней</b>"]
-        lines += [f"· {esc(metric.render())}" for metric in board.metrics]
-
-    if board.quiet:
-        lines += ["", "Ничего не требует внимания."]
-
-    return "\n".join(lines)
-
-
 def _day_kb(board: dashboard.Board) -> InlineKeyboardMarkup | None:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="📅 " + cut(m.title, 30), callback_data=f"mt:card:{m.id}")]
@@ -317,7 +252,9 @@ async def my_day(
     message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
     board = await dashboard.build(session, viewer=user, grants=grants)
-    await message.answer(_day_text(board, user.timezone), reply_markup=_day_kb(board))
+    # Текст собирает служба: этот же экран уходит утренней сводкой, и два
+    # описания одного экрана разошлись бы молча.
+    await message.answer(dashboard.render(board), reply_markup=_day_kb(board))
 
 
 @router.message(F.text == BTN_MY_MEETINGS)
