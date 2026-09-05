@@ -8,6 +8,7 @@
 получателя свой список документов**. Досье рассылается всем участникам, но
 человеку, которому файл не открыт, он не показывается даже названием.
 """
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from sqlalchemy import or_, select
@@ -74,22 +75,73 @@ async def related_decisions(
     return list(rows.scalars().all())
 
 
-async def build(
-    session: AsyncSession, *, meeting: Meeting, viewer: User, now: datetime | None = None
-) -> str:
-    """Текст досье для конкретного человека."""
-    now = now or utcnow()
-    when = to_local(meeting.start_at, viewer.timezone).strftime("%H:%M")
-    owner = await session.get(User, meeting.owner_id)
+@dataclass(slots=True)
+class Shared:
+    """Часть досье, одинаковая для всех участников встречи.
 
-    people = (
-        await session.execute(
-            select(User)
-            .join(MeetingParticipant, MeetingParticipant.user_id == User.id)
-            .where(MeetingParticipant.meeting_id == meeting.id)
-            .order_by(User.full_name)
-        )
-    ).scalars().all()
+    Своим у каждого получателя остаётся только список документов — их видимость
+    зависит от человека. Тема, ведущий, состав и прошлые решения одни и те же,
+    и добывать их заново на каждого — это те же выборки, повторённые столько
+    раз, сколько человек в комнате.
+    """
+
+    owner: User | None = None
+    people: list[User] = field(default_factory=list)
+    decisions: list[Decision] = field(default_factory=list)
+    responsible_names: dict[int, str] = field(default_factory=dict)
+
+
+async def shared_for(
+    session: AsyncSession, *, meeting: Meeting, now: datetime | None = None
+) -> Shared:
+    """Собирает общую часть досье — один раз на встречу."""
+    now = now or utcnow()
+    owner = await session.get(User, meeting.owner_id)
+    people = list(
+        (
+            await session.execute(
+                select(User)
+                .join(MeetingParticipant, MeetingParticipant.user_id == User.id)
+                .where(MeetingParticipant.meeting_id == meeting.id)
+                .order_by(User.full_name)
+            )
+        ).scalars().all()
+    )
+    decisions = await related_decisions(session, meeting=meeting, now=now)
+
+    # Имена ответственных — одним запросом, а не по одному внутри цикла.
+    wanted = {d.responsible_id for d in decisions if d.responsible_id}
+    names: dict[int, str] = {}
+    if wanted:
+        names = {
+            row[0]: row[1]
+            for row in (
+                await session.execute(
+                    select(User.id, User.full_name).where(User.id.in_(wanted))
+                )
+            ).all()
+        }
+    return Shared(owner=owner, people=people, decisions=decisions, responsible_names=names)
+
+
+async def build(
+    session: AsyncSession,
+    *,
+    meeting: Meeting,
+    viewer: User,
+    now: datetime | None = None,
+    shared: Shared | None = None,
+) -> str:
+    """Текст досье для конкретного человека.
+
+    `shared` передаёт рассылка, чтобы не собирать общую часть заново на каждого
+    участника. Вызов без него остаётся корректным — просто дороже.
+    """
+    now = now or utcnow()
+    shared = shared or await shared_for(session, meeting=meeting, now=now)
+    when = to_local(meeting.start_at, viewer.timezone).strftime("%H:%M")
+    owner = shared.owner
+    people = shared.people
 
     lines = [
         f"📋 <b>Через {BRIEF_MINUTES} минут</b>",
@@ -98,8 +150,10 @@ async def build(
         f"🕐 {when}, ведёт {esc(owner.full_name) if owner else 'неизвестно'}",
     ]
     if len(people) > 1:
-        names = ", ".join(esc(p.full_name) for p in people if p.id != meeting.owner_id)
-        lines.append(f"👥 {cut(names, 200)}")
+        # Сначала обрезаем, потом экранируем: обратный порядок режет строку
+        # посреди `&lt;`, и Telegram не доставляет сообщение целиком.
+        names = ", ".join(p.full_name for p in people if p.id != meeting.owner_id)
+        lines.append(f"👥 {esc(cut(names, 200))}")
 
     # Список документов свой у каждого: то, что человеку не открыто, он не
     # видит и названием. Иначе досье само становилось бы утечкой.
@@ -108,15 +162,11 @@ async def build(
         lines += ["", "<b>Документы</b>"]
         lines += [f"📎 {esc(f.title or f.file_name)}" for f in files[:MAX_ITEMS]]
 
-    open_decisions = await related_decisions(session, meeting=meeting, now=now)
-    if open_decisions:
+    if shared.decisions:
         lines += ["", "<b>Незакрытые решения по этим людям</b>"]
-        for decision in open_decisions:
-            responsible = (
-                await session.get(User, decision.responsible_id)
-                if decision.responsible_id else None
-            )
-            who = f" — {esc(responsible.full_name)}" if responsible else ""
+        for decision in shared.decisions:
+            name = shared.responsible_names.get(decision.responsible_id or 0)
+            who = f" — {esc(name)}" if name else ""
             lines.append(f"• {esc(cut(decision.title, 120))}{who}")
 
     return "\n".join(lines)
@@ -142,15 +192,13 @@ async def send_briefings(session: AsyncSession, now: datetime | None = None) -> 
 
     sent = 0
     for meeting in meetings:
-        people = (
-            await session.execute(
-                select(User)
-                .join(MeetingParticipant, MeetingParticipant.user_id == User.id)
-                .where(MeetingParticipant.meeting_id == meeting.id)
+        # Общая часть — один раз на встречу, дальше по каждому получателю
+        # добираются только его документы.
+        shared = await shared_for(session, meeting=meeting, now=now)
+        for person in shared.people:
+            body = await build(
+                session, meeting=meeting, viewer=person, now=now, shared=shared
             )
-        ).scalars().all()
-        for person in people:
-            body = await build(session, meeting=meeting, viewer=person, now=now)
             created = await enqueue(
                 session,
                 user_id=person.id,

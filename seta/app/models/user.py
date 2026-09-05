@@ -49,7 +49,10 @@ class User(Base, PKMixin, TimestampMixin):
     requested_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Tashkent")
-    locale: Mapped[str] = mapped_column(String(10), nullable=False, default="ru")
+    # Основной язык — узбекская латиница. У тех, кто уже зарегистрирован,
+    # в этом поле стоит их прежний выбор, и трогать его нельзя: язык человек
+    # выбирает сам, а не получает сменившимся после обновления.
+    locale: Mapped[str] = mapped_column(String(10), nullable=False, default="uz")
 
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

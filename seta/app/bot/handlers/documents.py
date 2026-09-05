@@ -25,6 +25,7 @@ from app.core.timeutil import fmt_dt, utcnow
 from app.models import Document, DocumentScope, IndexStatus, Meeting, User, UserStatus
 from app.models.org import Organization
 from app.services import documents as service
+from app.services import features as feature_service
 from app.services.rbac import Grant, has_permission
 
 router = Router(name="documents")
@@ -107,8 +108,12 @@ async def _card_text(session: AsyncSession, document: Document, viewer: User) ->
 # ── Приём ───────────────────────────────────────────────────────────────────
 @router.message(F.document)
 async def receive(
-    message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
+    message: Message, session: AsyncSession, user: User,
+    grants: dict[str, Grant], features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "documents"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     incoming = message.document
     result = await service.store(
         session,

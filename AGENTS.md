@@ -15,6 +15,10 @@
 | 6 | `agent/HISTORY.md` | Журнал сессий: что менялось и когда |
 | 7 | `STRUCTURE.md` | Что лежит в каждой папке и зачем нужен каждый файл |
 
+Если нужен только быстрый старт по коду — `.claude/Code/README.md`.
+Карта памяти и лента сессий одной строкой — `.claude/Memory/README.md`.
+Оба файла — указатели: содержание живёт в `agent/`.
+
 Полное техническое описание продукта — `Архитектура SETA.html` (открыть в браузере).
 Исходная постановка от заказчика — `Проект Бот.txt`.
 
@@ -38,20 +42,21 @@
 ```bash
 cd seta
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
-docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/smoke_block1.py
-docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/smoke_block2.py
-docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/stress_test.py
+for check in smoke_block1 smoke_block2 smoke_hardening smoke_block3 \
+             smoke_block4 smoke_block5 stress_test; do
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+    run --rm --no-deps migrate python scripts/$check.py
+done
 ```
 
-Все три должны показать `Ошибок: 0`. Если нет — сначала чини, потом делай новое.
+Все семь должны показать `Ошибок: 0` — суммарно 701 проверка.
+Если нет — сначала чини, потом делай новое.
 
 ## Что делать в конце работы
 
 1. Обнови `agent/STATE.md` — что стало готово, что следующее.
-2. Допиши запись в `agent/HISTORY.md` — дата, что сделано, что проверено.
+2. Допиши запись в `agent/HISTORY.md` — дата, что сделано, что проверено,
+   и строку в ленту `.claude/Memory/README.md`.
 3. Если менялись решения — обнови `agent/DECISIONS.md` с обоснованием.
 4. Если менялась схема или правила — обнови `agent/ARCHITECTURE.md`.
 5. Обнови `README.md`, если изменилось то, что видит пользователь.
@@ -64,6 +69,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 | Слой | Что хранит | Где лежит | Кто пишет |
 |---|---|---|---|
 | **`agent/` в репозитории** | Решения и почему именно так, архитектура, состояние, соглашения, журнал инцидентов | GitHub, версионируется вместе с кодом | агент, осознанно, в конце сессии |
+| **`.claude/` в репозитории** | Указатели: карта памяти, лента сессий, быстрый старт по коду | GitHub, вместе с кодом | агент, в конце сессии |
 | **claude-mem** | Автоматические наблюдения: какие файлы читались и менялись, что запускалось | `~/.claude-mem` только на этой машине | плагин, сам, без участия агента |
 | **Личная память ассистента** | Кто владелец, как с ним работать, где лежит проект | Локальный каталог памяти Claude | агент, редко |
 
@@ -82,5 +88,12 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 
 ## Язык
 
-Владелец пишет по-русски. Весь интерфейс, комментарии в коде и документация — на русском.
+Владелец пишет по-русски. Комментарии в коде и документация — на русском.
 Код (имена переменных, функций, таблиц) — на английском.
+
+**Интерфейс — три варианта, и русский среди них не главный** (решение Р-20).
+Эталон — узбекская латиница (`app/i18n/uz.py`); кириллица выводится из неё
+правилом; русский — отдельный дополнительный словарь. Новая строка интерфейса
+пишется ключом (`t("menu.tasks", locale)`) и заводится в узбекском словаре
+в первую очередь: ключа, которого нет в эталоне, не существует, и проверка
+`scripts/smoke_i18n.py` этого не пропустит.

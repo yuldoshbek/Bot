@@ -43,6 +43,7 @@ SERVICES = {
     "worker:delivery": "Доставка уведомлений",
     "worker:deadlines": "Контроль сроков",
     "worker:meetings": "Уход за встречами",
+    "worker:digest": "Утренняя сводка",
     "worker:documents": "Разбор документов",
 }
 

@@ -26,6 +26,7 @@ from app.models import (
     NotificationPriority,
     User,
 )
+from app.services import meetings as meeting_service
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
 from app.services.rbac import can_access_object, has_permission, load_grants
@@ -102,8 +103,19 @@ async def check_in(
     Отметка после начала принимается и записывается как опоздание: человек,
     вошедший на седьмой минуте, присутствовал, и притворяться, что его не
     было, незачем.
+
+    Отметиться может только участник встречи. Проверка здесь, а не в
+    обработчике: журнал явки имеет смысл, только если в него невозможно
+    попасть, не будучи приглашённым, — а номер встречи в нажатой кнопке
+    к участию не имеет отношения.
     """
     now = now or utcnow()
+    if user.organization_id != meeting.organization_id:
+        return False, "Встреча другой организации."
+    if not await meeting_service.is_participant(
+        session, meeting_id=meeting.id, user_id=user.id
+    ):
+        return False, "Вас нет в списке участников этой встречи."
     if meeting.status == MeetingStatus.CANCELLED:
         return False, "Встреча отменена."
     if now < meeting.start_at - timedelta(minutes=CHECKIN_OPENS_MINUTES):

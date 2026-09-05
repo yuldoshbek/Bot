@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     # Организация
     org_name: str = "Организация"
     default_timezone: str = "Asia/Tashkent"
-    default_locale: str = "ru"
+    # Основной язык — узбекский латиницей. Русский остаётся, но дополнительным:
+    # человек переключает его сам в профиле.
+    default_locale: str = "uz"
 
     # Хранилища
     database_url: str = "postgresql+asyncpg://seta:seta@localhost:5432/seta"

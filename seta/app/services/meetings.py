@@ -40,7 +40,14 @@ from app.models import (
 from app.services import quotas, slots as slot_service
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
-from app.services.rbac import Grant, Scope, can_access_object, has_permission, load_grants
+from app.services.rbac import (
+    Grant,
+    Scope,
+    can_access_object,
+    has_permission,
+    load_grants,
+    visible_department_ids,
+)
 
 # Меньше этого удерживать бессмысленно: человек не успеет даже прочитать заявку.
 MIN_HOLD_MINUTES = 30
@@ -730,6 +737,54 @@ async def by_participant(
     return list(
         (await session.execute(query.order_by(Meeting.start_at).distinct())).scalars().all()
     )
+
+
+async def may_read(session: AsyncSession, *, meeting: Meeting, viewer: User) -> bool:
+    """Открыта ли встреча этому человеку. Единственная точка ответа на вопрос.
+
+    Отвечает ровно то же, что условие `visible_filter` в SQL. Пара нужна по той
+    же причине, что у документов: список нельзя фильтровать после `LIMIT`,
+    а одну запись нельзя открывать запросом на всю выборку. Совпадение двух
+    описаний проверяется прогоном по матрице «встреча × человек»
+    в `smoke_block3.py`, а не держится на аккуратности при следующей правке.
+
+    Без неё карточка встречи отдавала тему, ведущего и состав участников любому
+    сотруднику организации, знающему номер: право `meeting.read` есть у всех,
+    а область (`SELF`) не проверялась.
+    """
+    if viewer.organization_id != meeting.organization_id:
+        return False
+
+    grants = await load_grants(session, viewer)
+    if not has_permission(grants, "meeting.read"):
+        return False
+    if meeting.owner_id == viewer.id:
+        return True
+    if await is_participant(session, meeting_id=meeting.id, user_id=viewer.id):
+        return True
+
+    scope = grants["meeting.read"].scope
+    if scope == Scope.ORGANIZATION:
+        return True
+    if scope == Scope.DEPARTMENT:
+        # Та же граница, что в visible_filter: пустой список видимых отделов
+        # не открывает ничего сверх своих встреч.
+        visible = await visible_department_ids(session, viewer)
+        if visible:
+            owner = await session.get(User, meeting.owner_id)
+            return owner is not None and owner.department_id in visible
+    return False
+
+
+async def is_participant(session: AsyncSession, *, meeting_id: int, user_id: int) -> bool:
+    """Есть ли человек в списке участников встречи."""
+    found = await session.scalar(
+        select(MeetingParticipant.id).where(
+            MeetingParticipant.meeting_id == meeting_id,
+            MeetingParticipant.user_id == user_id,
+        )
+    )
+    return found is not None
 
 
 def visible_filter(user: User, grants: dict[str, Grant], visible_departments: set[int]) -> list:

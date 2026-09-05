@@ -33,7 +33,14 @@ from app.models.task import Task, TaskComment, TaskEvent, TaskExtension
 from app.models.user import User
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
-from app.services.rbac import Grant, Scope, has_permission, user_role_codes, visible_department_ids
+from app.services.rbac import (
+    Grant,
+    Scope,
+    can_access_object,
+    has_permission,
+    user_role_codes,
+    visible_department_ids,
+)
 
 # Статусы, в которых поручение считается живым.
 ACTIVE_STATUSES = (
@@ -119,6 +126,30 @@ async def resolve_reviewer(
     return assistant.id if assistant else creator.id
 
 
+async def may_assign_to(
+    session: AsyncSession, *, actor: User, grants: dict[str, Grant], assignee: User
+) -> bool:
+    """Вправе ли этот человек поручать этому.
+
+    Живёт в службе, а не в обработчике: то же правило нужно при создании
+    поручения из шаблона и из встречи. Три места с одной проверкой разошлись бы
+    молча — и разошлись бы именно там, где право `task.create` есть у всех,
+    а область у каждого своя.
+    """
+    if assignee.organization_id != actor.organization_id:
+        return False
+    if assignee.status != UserStatus.ACTIVE:
+        return False
+    return await can_access_object(
+        session,
+        actor,
+        grants,
+        "task.create",
+        owner_id=assignee.id,
+        department_id=assignee.department_id,
+    )
+
+
 def default_requires_review(priority: Priority) -> bool:
     """Для важного проверка включается сама, для рутины остаётся выключенной."""
     return priority in (Priority.HIGH, Priority.CRITICAL)
@@ -193,7 +224,7 @@ async def create_task(
         if principal:
             author = f"{esc(creator.full_name)} по поручению: {esc(principal.full_name)}"
 
-    due_line = f"\n⏰ Срок: {humanize_due(due_at, assignee.timezone)}" if due_at else ""
+    due_line = f"\n⏰ Срок: {humanize_due(due_at, assignee.timezone, assignee.locale)}" if due_at else ""
     await enqueue(
         session,
         user_id=assignee.id,
@@ -487,14 +518,20 @@ async def request_extension(
     await session.flush()
 
     decider_id = task.on_behalf_of_id or task.creator_id
+    # Получатель нужен до сборки текста, а не после: срок показывается в его
+    # часовом поясе и на его языке. `_notify` находит его сам, но уже поздно —
+    # текст к тому моменту собран, и человек в другом поясе видел бы чужой час.
+    decider = await session.get(User, decider_id) if decider_id else None
+    zone = decider.timezone if decider else None
+    speech = decider.locale if decider else None
     await _notify(
         session, decider_id,
         f"task:{task.id}:ext:{extension.id}", "task.extension_requested",
         NotificationPriority.NORMAL,
         f"⏰ <b>Просят перенести срок</b>\n\n{esc(task.title)}\n"
         f"👤 {esc(actor.full_name)}\n"
-        f"Было: {humanize_due(task.due_at) if task.due_at else 'без срока'}\n"
-        f"Станет: {humanize_due(new_due_at)}\n💬 {esc(reason.strip())}",
+        f"Было: {humanize_due(task.due_at, zone, speech) if task.due_at else 'без срока'}\n"
+        f"Станет: {humanize_due(new_due_at, zone, speech)}\n💬 {esc(reason.strip())}",
         task.id,
     )
     return extension
@@ -539,12 +576,15 @@ async def decide_extension(
         )
 
     verdict = "продлён" if approved else "оставлен прежним"
+    asker = await session.get(User, extension.requested_by)
+    zone = asker.timezone if asker else None
+    speech = asker.locale if asker else None
     await _notify(
         session, extension.requested_by,
         f"task:{task.id}:extdone:{extension.id}", "task.extension_decided",
         NotificationPriority.NORMAL,
         f"⏰ <b>Срок {verdict}</b>\n\n{esc(task.title)}\n"
-        f"Срок: {humanize_due(task.due_at) if task.due_at else 'без срока'}"
+        f"Срок: {humanize_due(task.due_at, zone, speech) if task.due_at else 'без срока'}"
         + (f"\n💬 {esc(comment)}" if comment else ""),
         task.id,
     )

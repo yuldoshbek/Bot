@@ -3,14 +3,24 @@
 Руководитель пишет «до пятницы» или «завтра», а не «2026-09-04T19:00:00+05:00».
 Разбираем то, как люди действительно пишут сроки, и всегда показываем результат
 на подтверждение - угаданная дата без подтверждения хуже, чем спросить.
+
+**Понимать и говорить — разные вещи.** Разбор принимает все языки сразу
+и не смотрит на выбранный человеком: в узбекском кабинете «juma gacha» и
+«до пятницы» пишет один и тот же человек в течение одного дня, а срок,
+не понятый из-за настройки в профиле, выглядит поломкой. Отвечает бот,
+наоборот, строго на языке собеседника.
 """
 import re
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+from app.core.i18n import t
 from app.core.timeutil import parse_hhmm, to_local, to_utc
 
+# Формы всех трёх языков в одном справочнике. Совпадение ищется по границам
+# слова, а не по вхождению: иначе «shanba» (суббота) нашлась бы внутри
+# «dushanba» (понедельника) и срок уехал бы на пять дней.
 WEEKDAYS: dict[str, int] = {
     "понедельник": 0, "пн": 0, "понедельника": 0,
     "вторник": 1, "вт": 1, "вторника": 1,
@@ -19,6 +29,12 @@ WEEKDAYS: dict[str, int] = {
     "пятница": 4, "пт": 4, "пятницу": 4, "пятницы": 4,
     "суббота": 5, "сб": 5, "субботу": 5, "субботы": 5,
     "воскресенье": 6, "вс": 6, "воскресенья": 6,
+    # Узбекская латиница
+    "dushanba": 0, "seshanba": 1, "chorshanba": 2, "payshanba": 3,
+    "juma": 4, "shanba": 5, "yakshanba": 6,
+    # Узбекская кириллица
+    "душанба": 0, "сешанба": 1, "чоршанба": 2, "пайшанба": 3,
+    "жума": 4, "шанба": 5, "якшанба": 6,
 }
 
 MONTHS: dict[str, int] = {
@@ -28,14 +44,41 @@ MONTHS: dict[str, int] = {
     "июля": 7, "июль": 7, "августа": 8, "август": 8,
     "сентября": 9, "сентябрь": 9, "октября": 10, "октябрь": 10,
     "ноября": 11, "ноябрь": 11, "декабря": 12, "декабрь": 12,
+    # Узбекская латиница
+    "yanvar": 1, "fevral": 2, "mart": 3, "aprel": 4, "may": 5, "iyun": 6,
+    "iyul": 7, "avgust": 8, "sentabr": 9, "oktabr": 10,
+    "noyabr": 11, "dekabr": 12,
+    # Узбекская кириллица
+    "январ": 1, "феврал": 2, "апрел": 4, "июн": 6, "июл": 7,
+    "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
 }
 
+# «Сегодня», «завтра» и «послезавтра» на всех языках. Порядок важен:
+# «послезавтра» ищется раньше «завтра», иначе съело бы его.
+RELATIVE_DAYS: list[tuple[tuple[str, ...], int]] = [
+    (("послезавтра", "indinga", "indin", "индинга"), 2),
+    (("завтра", "ertaga", "эртага"), 1),
+    (("сегодня", "bugun", "бугун"), 0),
+]
 
-def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
+# «через 3 дня», «3 kundan keyin», «2 hafta ichida».
+THROUGH_RU = re.compile(r"через\s+(\d{1,3})\s*(дн|день|дня|дней|недел)")
+THROUGH_UZ = re.compile(
+    r"(\d{1,3})\s*(kun|hafta|кун|ҳафта)\w*\s*(?:dan|дан)?\s*(keyin|ichida|кейин|ичида)"
+)
+
+
+def parse_due(
+    text: str, tz_name: str | None = None, *, now: datetime | None = None
+) -> datetime | None:
     """Превращает текст в срок (UTC). Возвращает None, если понять не удалось.
 
     Понимает: сегодня, завтра, послезавтра, день недели, «через N дней»,
     05.09, 05.09.2026, «5 сентября». Время по умолчанию - конец рабочего дня.
+
+    `now` подставляется явно там, где точку отсчёта нельзя брать из часов
+    машины: шаблон поручения считает срок от дня применения, и проверка обязана
+    уметь задать этот день. Без параметра берётся текущий момент, как раньше.
     """
     if not text:
         return None
@@ -44,7 +87,7 @@ def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
     raw = re.sub(r"^(до|к|на)\s+", "", raw)
 
     tz = ZoneInfo(tz_name or settings.default_timezone)
-    now_local = to_local(datetime.now(tz=tz), tz_name)
+    now_local = to_local(now or datetime.now(tz=tz), tz_name)
 
     # Время указано отдельно: «завтра 15:00».
     # Только через двоеточие: точка означает дату, иначе «05.09» превращается в 05:09.
@@ -59,19 +102,24 @@ def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
     default_time = explicit_time or parse_hhmm(settings.work_end)
     target: datetime | None = None
 
-    if "послезавтра" in raw:
-        target = now_local + timedelta(days=2)
-    elif "завтра" in raw:
-        target = now_local + timedelta(days=1)
-    elif "сегодня" in raw:
-        target = now_local
+    for words, shift in RELATIVE_DAYS:
+        if any(word in raw for word in words):
+            target = now_local + timedelta(days=shift)
+            break
 
     if target is None:
-        through = re.search(r"через\s+(\d{1,3})\s*(дн|день|дня|дней|недел)", raw)
+        through = THROUGH_RU.search(raw)
         if through:
             amount = int(through.group(1))
             days = amount * 7 if through.group(2).startswith("недел") else amount
             target = now_local + timedelta(days=days)
+
+    if target is None:
+        through = THROUGH_UZ.search(raw)
+        if through:
+            amount = int(through.group(1))
+            weeks = through.group(2) in ("hafta", "ҳафта")
+            target = now_local + timedelta(days=amount * 7 if weeks else amount)
 
     if target is None:
         for name, weekday in WEEKDAYS.items():
@@ -96,7 +144,8 @@ def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
                 target = target.replace(year=year + 1)
 
     if target is None:
-        worded = re.search(r"\b(\d{1,2})\s+([а-я]+)\b", raw)
+        # Буквы обоих алфавитов: «5 сентября» и «5 sentabr» пишут одинаково часто.
+        worded = re.search(r"\b(\d{1,2})\s+([а-яёa-z]+)\b", raw)
         if worded and worded.group(2) in MONTHS:
             day, month = int(worded.group(1)), MONTHS[worded.group(2)]
             try:
@@ -115,24 +164,30 @@ def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
     return to_utc(target.replace(tzinfo=None), tz_name)
 
 
-def humanize_due(due_at: datetime, tz_name: str | None = None) -> str:
-    """«Завтра, 19:00» вместо «04.09.2026 19:00» - так понятнее с одного взгляда."""
+def humanize_due(
+    due_at: datetime, tz_name: str | None = None, locale: str | None = None
+) -> str:
+    """«Завтра, 19:00» вместо «04.09.2026 19:00» - так понятнее с одного взгляда.
+
+    День недели берётся отдельным ключом на каждый день, а не собирается
+    из предлога и названия: по-русски «во вторник», но «в среду», и склеить
+    их правилом нельзя. В узбекском послелог, наоборот, один — «juma kuni», —
+    и ключ на день это тоже выдерживает.
+    """
     local = to_local(due_at, tz_name)
     today = to_local(datetime.now(tz=ZoneInfo(tz_name or settings.default_timezone)), tz_name).date()
     delta = (local.date() - today).days
 
     if delta == 0:
-        prefix = "Сегодня"
+        prefix = t("date.today", locale)
     elif delta == 1:
-        prefix = "Завтра"
+        prefix = t("date.tomorrow", locale)
     elif delta == 2:
-        prefix = "Послезавтра"
+        prefix = t("date.day_after_tomorrow", locale)
     elif delta == -1:
-        prefix = "Вчера"
+        prefix = t("date.yesterday", locale)
     elif 0 < delta < 7:
-        names = ["в понедельник", "во вторник", "в среду", "в четверг",
-                 "в пятницу", "в субботу", "в воскресенье"]
-        prefix = names[local.weekday()].capitalize()
+        prefix = t(f"date.on.{local.weekday()}", locale)
     else:
         prefix = local.strftime("%d.%m.%Y")
 

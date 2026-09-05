@@ -16,16 +16,18 @@ from aiogram.types import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import BTN_CONTROL, BTN_MY_TASKS, BTN_NEW_TASK, main_menu
+from app.bot.keyboards.common import MenuButton, MENU_CONTROL, MENU_MY_TASKS, MENU_NEW_TASK, main_menu
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.dates import humanize_due, parse_due
 from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt
 from app.models.enums import Priority, RoleCode, TaskStatus, UserStatus
 from app.models.org import Organization
-from app.models.task import Task, TaskComment, TaskEvent
+from app.models.task import Task, TaskComment, TaskEvent, TaskTemplate
 from app.models.user import User
 from app.services import tasks as service
+from app.services import templates
+from app.services import features as feature_service
 from app.services.rbac import Grant, can_access_object, has_permission, visible_department_ids
 from app.services.tasks import PRIORITY_LABELS, STATUS_LABELS, TaskError
 
@@ -48,6 +50,10 @@ class NewTask(StatesGroup):
     priority = State()
 
 
+class UseTemplate(StatesGroup):
+    assignee = State()
+
+
 class TaskInput(StatesGroup):
     comment = State()
     rework = State()
@@ -56,10 +62,11 @@ class TaskInput(StatesGroup):
 
 
 # ─────────────────────────  СОЗДАНИЕ  ─────────────────────────
-@router.message(F.text == BTN_NEW_TASK)
+@router.message(MenuButton(MENU_NEW_TASK))
 async def new_task(
     message: Message, state: FSMContext, session: AsyncSession,
     organization: Organization, user: User, grants: dict[str, Grant],
+    features: dict[str, bool],
 ) -> None:
     if not has_permission(grants, "task.create"):
         await message.answer("Создавать поручения может руководитель, ассистент или начальник отдела.")
@@ -74,6 +81,21 @@ async def new_task(
         return
 
     await state.clear()
+    ready = (
+        await templates.catalogue(session, organization_id=user.organization_id)
+        if feature_service.is_on(features, "templates")
+        else []
+    )
+    if ready:
+        await message.answer(
+            "<b>Типовые поручения</b>\n\nОдно нажатие — и поручение создано.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=f"📑 {cut(item.title, 40)}", callback_data=f"tt:use:{item.id}"
+                )]
+                for item in ready[:templates.QUICK_BUTTONS]
+            ] + [[InlineKeyboardButton(text="📚 Все шаблоны", callback_data="tt:list")]]),
+        )
     await message.answer(
         "<b>Новое поручение</b>\n\nКому поручаем?",
         reply_markup=_people_kb(people),
@@ -151,7 +173,7 @@ async def new_task_due(message: Message, state: FSMContext, user: User) -> None:
 
     await state.update_data(due_at=due_at.isoformat())
     await message.answer(
-        f"⏰ Срок: <b>{humanize_due(due_at, user.timezone)}</b>\n\nКакой приоритет?",
+        f"⏰ Срок: <b>{humanize_due(due_at, user.timezone, user.locale)}</b>\n\nКакой приоритет?",
         reply_markup=_priority_kb(),
     )
     await state.set_state(NewTask.priority)
@@ -223,7 +245,7 @@ async def new_task_priority(
         f"✅ <b>Поручение создано</b>\n\n"
         f"📋 {esc(cut(task.title, 200))}\n"
         f"👤 {esc(assignee.full_name)}\n"
-        f"⏰ {humanize_due(task.due_at, user.timezone) if task.due_at else 'без срока'}\n"
+        f"⏰ {humanize_due(task.due_at, user.timezone, user.locale) if task.due_at else 'без срока'}\n"
         f"🔺 {PRIORITY_LABELS[priority]}{review_line}\n\n"
         f"Исполнителю отправлено уведомление.",
         reply_markup=_task_kb_minimal(task.id),
@@ -231,7 +253,7 @@ async def new_task_priority(
 
 
 # ─────────────────────────  СПИСКИ  ─────────────────────────
-@router.message(F.text == BTN_MY_TASKS)
+@router.message(MenuButton(MENU_MY_TASKS))
 async def my_tasks(message: Message, session: AsyncSession, user: User) -> None:
     await _show_bucket(message, session, user, "active")
 
@@ -257,7 +279,7 @@ async def _show_bucket(
     else:
         lines = [f"<b>{title}: {len(items)}</b>", ""]
         for task in items:
-            due = f" · {humanize_due(task.due_at, user.timezone)}" if task.due_at else ""
+            due = f" · {humanize_due(task.due_at, user.timezone, user.locale)}" if task.due_at else ""
             lines.append(f"{STATUS_LABELS[TaskStatus(task.status)]}{due}\n📋 {esc(cut(task.title, 120))}")
         text = "\n\n".join(lines)
 
@@ -268,7 +290,7 @@ async def _show_bucket(
         await message.answer(text, reply_markup=keyboard)
 
 
-@router.message(F.text == BTN_CONTROL)
+@router.message(MenuButton(MENU_CONTROL))
 async def control(
     message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
@@ -491,7 +513,7 @@ async def input_extension_date(message: Message, state: FSMContext, user: User) 
     await state.update_data(new_due=new_due.isoformat())
     await state.set_state(TaskInput.extension_reason)
     await message.answer(
-        f"Новый срок: <b>{humanize_due(new_due, user.timezone)}</b>\n\n"
+        f"Новый срок: <b>{humanize_due(new_due, user.timezone, user.locale)}</b>\n\n"
         "Почему нужен перенос? Причина уйдёт автору поручения."
     )
 
@@ -544,7 +566,7 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
         f"✍️ Автор: {author}",
     ]
     if task.due_at:
-        lines.append(f"⏰ Срок: {humanize_due(task.due_at, viewer.timezone)}")
+        lines.append(f"⏰ Срок: {humanize_due(task.due_at, viewer.timezone, viewer.locale)}")
     lines.append(f"🔺 Приоритет: {PRIORITY_LABELS[Priority(task.priority)]}")
     if task.description:
         lines += ["", esc(cut(task.description, 800))]
@@ -562,7 +584,7 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
     if extension is not None:
         lines += [
             "",
-            f"⏰ <b>Просят перенести срок</b> на {humanize_due(extension.new_due_at, viewer.timezone)}",
+            f"⏰ <b>Просят перенести срок</b> на {humanize_due(extension.new_due_at, viewer.timezone, viewer.locale)}",
             f"💬 {esc(cut(extension.reason, 300))}",
         ]
 
@@ -623,6 +645,10 @@ def _task_kb(task: Task, access: service.TaskAccess) -> InlineKeyboardMarkup:
     if access.can_cancel:
         bottom.append(InlineKeyboardButton(text="⚫ Отменить", callback_data=f"t:cancel:{tid}"))
     rows.append(bottom)
+    # Шаблон заводится из готового поручения: формулировка, приоритет и срок
+    # у него уже есть, и переспрашивать их мастером значит просить ввести
+    # дважды то, что система знает.
+    rows.append([InlineKeyboardButton(text="📑 Сохранить как шаблон", callback_data=f"tt:save:{tid}")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -701,18 +727,10 @@ async def _allowed_assignees(
 async def _may_assign_to(
     session: AsyncSession, user: User, grants: dict[str, Grant], assignee: User
 ) -> bool:
-    """Проверка конкретной записи: область права плюс граница организации."""
-    if assignee.organization_id != user.organization_id:
-        return False
-    if assignee.status != UserStatus.ACTIVE:
-        return False
-    return await can_access_object(
-        session,
-        user,
-        grants,
-        "task.create",
-        owner_id=assignee.id,
-        department_id=assignee.department_id,
+    """Проверка конкретной записи. Правило живёт в службе: то же самое нужно
+    при создании поручения из шаблона, и двух описаний быть не должно."""
+    return await service.may_assign_to(
+        session, actor=user, grants=grants, assignee=assignee
     )
 
 
@@ -732,3 +750,171 @@ async def _executive_of(session: AsyncSession, organization_id: int) -> User | N
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+# ─────────────────────────  ШАБЛОНЫ  ─────────────────────────
+# Типовое поручение в одно нажатие — функция 09 первой волны, долг блока 2.
+# Заводится из готового поручения, применяется с экрана создания.
+
+
+@router.callback_query(F.data.startswith("tt:save:"))
+async def template_save(
+    call: CallbackQuery, session: AsyncSession, user: User,
+    grants: dict[str, Grant], features: dict[str, bool],
+) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
+    task = await session.get(Task, callback_int(call.data) or 0)
+    if task is None:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    # Право видеть поручение проверяется тем же способом, что и везде:
+    # из карточки, которую человеку не открыли, шаблон не заведёшь.
+    access = await service.access_for(session, task, user, grants)
+    if not access.can_view:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+
+    result = await templates.from_task(session, task=task, actor=user, grants=grants)
+    if not result.ok:
+        await call.answer(result.reason or "Не получилось.", show_alert=True)
+        return
+    if result.duplicate:
+        await call.answer("Такой шаблон уже есть.", show_alert=True)
+        return
+    await call.answer("Шаблон сохранён.")
+    await call.message.answer(
+        f"📑 <b>Шаблон готов</b>\n\n{esc(cut(result.item.title, 80))}\n"
+        f"Срок: через {result.item.default_days} дн. от дня применения\n\n"
+        "Он появится на экране «Поручение»."
+    )
+
+
+@router.callback_query(F.data == "tt:list")
+async def template_list(
+    call: CallbackQuery, session: AsyncSession, user: User, features: dict[str, bool]
+) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
+    items = await templates.catalogue(session, organization_id=user.organization_id)
+    if not items:
+        await call.answer("Шаблонов пока нет.", show_alert=True)
+        return
+
+    lines = ["📚 <b>Шаблоны поручений</b>", ""]
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in items:
+        due = f"через {item.default_days} дн." if item.default_days else "без срока"
+        lines.append(f"📑 {esc(cut(item.title, 70))} — {due}")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"▶️ {cut(item.title, 28)}", callback_data=f"tt:use:{item.id}"
+            ),
+            InlineKeyboardButton(text="🗑", callback_data=f"tt:drop:{item.id}"),
+        ])
+    await call.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows[:8]))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("tt:use:"))
+async def template_use(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant], features: dict[str, bool],
+) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
+    template = await session.get(TaskTemplate, callback_int(call.data) or 0)
+    if template is None or template.organization_id != user.organization_id:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+
+    result = await templates.apply(session, template=template, actor=user, grants=grants)
+    if not result.ok:
+        # Чаще всего причина одна: в шаблоне нет исполнителя. Тогда спрашиваем,
+        # а не отказываем — шаблон без адресата всё равно экономит формулировку.
+        if template.default_assignee_id is None:
+            people = await _allowed_assignees(session, user, grants)
+            if people:
+                await state.clear()
+                await state.update_data(template_id=template.id)
+                await call.message.answer(
+                    f"📑 <b>{esc(cut(template.title, 70))}</b>\n\nКому поручаем?",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=person.full_name, callback_data=f"tt:to:{person.id}"
+                        )]
+                        for person in people[:7]
+                    ]),
+                )
+                await state.set_state(UseTemplate.assignee)
+                await call.answer()
+                return
+        await call.answer(result.reason or "Не получилось.", show_alert=True)
+        return
+
+    if result.duplicate:
+        await call.answer("Это поручение уже создано и ещё не принято.", show_alert=True)
+        return
+    await call.answer("Готово.")
+    await _announce_template(call.message, session, result.item, user)
+
+
+@router.callback_query(UseTemplate.assignee, F.data.startswith("tt:to:"))
+async def template_assignee(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant],
+) -> None:
+    data = await state.get_data()
+    template = await session.get(TaskTemplate, data.get("template_id", 0))
+    assignee = await session.get(User, callback_int(call.data) or 0)
+    if template is None or assignee is None:
+        await state.clear()
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+
+    result = await templates.apply(
+        session, template=template, actor=user, grants=grants, assignee=assignee
+    )
+    await state.clear()
+    if not result.ok:
+        await call.answer(result.reason or "Не получилось.", show_alert=True)
+        return
+    await call.answer("Это поручение уже создано." if result.duplicate else "Готово.")
+    if not result.duplicate:
+        await _announce_template(call.message, session, result.item, user)
+
+
+@router.callback_query(F.data.startswith("tt:drop:"))
+async def template_drop(
+    call: CallbackQuery, session: AsyncSession, user: User, features: dict[str, bool]
+) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
+    template = await session.get(TaskTemplate, callback_int(call.data) or 0)
+    if template is None or template.organization_id != user.organization_id:
+        await call.answer(STALE_BUTTON, show_alert=True)
+        return
+    title = template.title
+    problem = await templates.remove(session, template=template, actor=user)
+    if problem:
+        await call.answer(problem, show_alert=True)
+        return
+    await call.answer("Шаблон удалён.")
+    await call.message.answer(f"🗑 Шаблон «{esc(cut(title, 60))}» удалён.")
+
+
+async def _announce_template(message: Message, session: AsyncSession, task: Task, user: User) -> None:
+    """Сообщение об успехе. Поручение из шаблона — обычное поручение."""
+    assignee = await session.get(User, task.assignee_id)
+    when = fmt_dt(task.due_at, user.timezone) if task.due_at else "без срока"
+    await message.answer(
+        f"✅ <b>Поручение создано</b>\n\n"
+        f"{esc(cut(task.title, 80))}\n"
+        f"👤 {esc(assignee.full_name) if assignee else '—'}\n"
+        f"🕐 Срок: {when}",
+        reply_markup=_task_kb_minimal(task.id),
+    )

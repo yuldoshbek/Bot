@@ -513,12 +513,14 @@ async def main() -> None:
         any(e["kind"] == "ValueError" for e in status.errors),
         "и в список последних ошибок",
     )
+    # Список перечислен явно, а не взят из кода: иначе новый фоновый цикл,
+    # забытый на странице состояния, прошёл бы незамеченным.
     check(
         set(status.services) == {
             "bot", "worker:delivery", "worker:deadlines",
-            "worker:meetings", "worker:documents",
+            "worker:meetings", "worker:digest", "worker:documents",
         },
-        "состояние следит за всеми пятью службами",
+        "состояние следит за всеми шестью службами",
         f"следит за: {sorted(status.services)}",
     )
 

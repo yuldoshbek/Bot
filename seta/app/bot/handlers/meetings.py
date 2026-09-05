@@ -19,10 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import (
-    BTN_MY_DAY,
-    BTN_MY_MEETINGS,
-    BTN_QUICK_MEETING,
-    BTN_REQUEST_MEETING,
+    MENU_MY_DAY,
+    MENU_MY_MEETINGS,
+    MENU_QUICK_MEETING,
+    MENU_REQUEST_MEETING,
+    MenuButton,
 )
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.text import cut, esc
@@ -34,7 +35,8 @@ from app.models.org import Organization
 from app.models.user import User
 from app.models.rbac import Role, UserRole
 from app.core.dates import humanize_due, parse_due
-from app.services import attendance, meetings as service, quotas
+from app.services import attendance, dashboard, meetings as service, quotas
+from app.services import features as feature_service
 from app.services import decisions as registry
 from app.services import documents as document_service
 from app.services import tasks as task_service
@@ -134,13 +136,15 @@ async def _my_meetings(
 
 
 def _card_kb(
-    meeting: Meeting, user: User, grants: dict[str, Grant], now: datetime
+    meeting: Meeting, grants: dict[str, Grant], now: datetime, *, is_participant: bool
 ) -> InlineKeyboardMarkup:
     """Кнопки карточки — только те, что этому человеку сейчас доступны."""
     rows: list[list[InlineKeyboardButton]] = []
     live = meeting.status != MeetingStatus.CANCELLED
 
-    if live and now < meeting.end_at:
+    # Отмечается участник. Ассистенту, который видит встречу по области права,
+    # эта кнопка не нужна и не работает: за других явку правят отдельно.
+    if is_participant and live and now < meeting.end_at:
         if now >= meeting.start_at - timedelta(minutes=attendance.CHECKIN_OPENS_MINUTES):
             rows.append([InlineKeyboardButton(
                 text="🙋 Я на месте", callback_data=f"mt:here:{meeting.id}"
@@ -193,9 +197,10 @@ def _card_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _card_text(session: AsyncSession, meeting: Meeting, viewer: User) -> str:
+async def _card_text(
+    session: AsyncSession, meeting: Meeting, viewer: User, people: list[User]
+) -> str:
     owner = await session.get(User, meeting.owner_id)
-    people = await service.participants_of(session, meeting)
     lines = [
         f"<b>{esc(meeting.title)}</b>",
         "",
@@ -204,8 +209,10 @@ async def _card_text(session: AsyncSession, meeting: Meeting, viewer: User) -> s
         f"👤 Ведёт: {esc(owner.full_name) if owner else 'неизвестно'}",
     ]
     if len(people) > 1:
-        names = ", ".join(esc(p.full_name) for p in people if p.id != meeting.owner_id)
-        lines.append(f"👥 Участники: {cut(names, 200)}")
+        # Сначала обрезаем, потом экранируем: обратный порядок режет строку
+        # посреди `&lt;`, и Telegram не доставляет сообщение целиком.
+        names = ", ".join(p.full_name for p in people if p.id != meeting.owner_id)
+        lines.append(f"👥 Участники: {esc(cut(names, 200))}")
     if meeting.status == MeetingStatus.CANCELLED:
         lines.append(f"\n🚫 Отменена. Причина: {esc(meeting.cancel_reason or 'не указана')}")
     elif meeting.reschedule_count:
@@ -222,56 +229,51 @@ async def _card_text(session: AsyncSession, meeting: Meeting, viewer: User) -> s
 
 
 # ── Мой день ────────────────────────────────────────────────────────────────
-@router.message(F.text == BTN_MY_DAY)
-async def my_day(
-    message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
-) -> None:
-    now = utcnow()
-    local = to_local(now, user.timezone)
-    day_start = (local.replace(hour=0, minute=0, second=0, microsecond=0)).astimezone(now.tzinfo)
-    day_end = day_start + timedelta(days=1)
-
-    today = await _my_meetings(session, user, since=day_start, until=day_end)
-    current = [m for m in today if m.start_at <= now < m.end_at]
-    ahead = [m for m in today if m.start_at > now]
-
-    lines = [f"<b>Мой день · {local.strftime('%d.%m')}</b>", ""]
-    if current:
-        lines.append("<b>Сейчас</b>")
-        for m in current:
-            lines.append(f"🔴 {esc(m.title)} — до {to_local(m.end_at, user.timezone):%H:%M}")
-        lines.append("")
-    if ahead:
-        lines.append("<b>Дальше</b>")
-        for m in ahead[:5]:
-            lines.append(f"🕐 {to_local(m.start_at, user.timezone):%H:%M} {esc(m.title)}")
-    elif not current:
-        lines.append("Встреч на сегодня нет.")
-
+def _day_kb(board: dashboard.Board) -> InlineKeyboardMarkup | None:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="📅 " + esc(cut(m.title, 30)), callback_data=f"mt:card:{m.id}")]
-        for m in (current + ahead)[:4]
+        [InlineKeyboardButton(text="📅 " + cut(m.title, 30), callback_data=f"mt:card:{m.id}")]
+        for m in (board.running + board.ahead)[:4]
     ]
+    if board.requests_waiting:
+        rows.append([InlineKeyboardButton(
+            text=f"📥 Заявки на встречу ({board.requests_waiting})", callback_data="rq:list"
+        )])
+    if board.to_review:
+        rows.append([InlineKeyboardButton(
+            text=f"🔍 На проверке ({board.to_review})", callback_data="tl:review"
+        )])
+    if board.overdue_total:
+        rows.append([InlineKeyboardButton(
+            text=f"🔴 Просроченные ({board.overdue_total})", callback_data="tl:overdue"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
-    if has_permission(grants, "meeting.approve"):
-        waiting = await service.pending_for(session, user)
-        over = await quotas.over_quota_requests(session, owner=user)
-        if waiting:
-            lines += ["", f"<b>Требуют решения: {len(waiting)}</b>"]
-            if over:
-                lines.append(f"из них сверх лимита: {len(over)}")
-            rows.append([InlineKeyboardButton(
-                text=f"📥 Заявки на встречу ({len(waiting)})", callback_data="rq:list"
-            )])
 
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
+@router.message(MenuButton(MENU_MY_DAY))
+async def my_day(
+    message: Message, session: AsyncSession, user: User,
+    grants: dict[str, Grant], features: dict[str, bool],
+) -> None:
+    # Выключенный раздел закрывается здесь, а не только в меню: кнопка,
+    # отправленная час назад, всё ещё лежит в истории чата и нажимается.
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
+    board = await dashboard.build(
+        session, viewer=user, grants=grants, features=features
     )
+    # Текст собирает служба: этот же экран уходит утренней сводкой, и два
+    # описания одного экрана разошлись бы молча.
+    await message.answer(dashboard.render(board), reply_markup=_day_kb(board))
 
 
-@router.message(F.text == BTN_MY_MEETINGS)
-async def my_meetings(message: Message, session: AsyncSession, user: User) -> None:
+@router.message(MenuButton(MENU_MY_MEETINGS))
+async def my_meetings(
+    message: Message, session: AsyncSession, user: User, features: dict[str, bool]
+) -> None:
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     now = utcnow()
     upcoming = await _my_meetings(session, user, since=now, until=now + timedelta(days=14))
     if not upcoming:
@@ -296,24 +298,31 @@ async def my_meetings(message: Message, session: AsyncSession, user: User) -> No
 async def meeting_card(
     call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
-    meeting_id = callback_int(call.data)
-    meeting = await session.get(Meeting, meeting_id) if meeting_id else None
-    if meeting is None or meeting.organization_id != user.organization_id:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
         await call.answer(STALE_BUTTON, show_alert=True)
         return
+    people = await service.participants_of(session, meeting)
     await call.message.answer(
-        await _card_text(session, meeting, user),
-        reply_markup=_card_kb(meeting, user, grants, utcnow()),
+        await _card_text(session, meeting, user, people),
+        reply_markup=_card_kb(
+            meeting, grants, utcnow(),
+            is_participant=any(p.id == user.id for p in people),
+        ),
     )
     await call.answer()
 
 
 # ── Запрос встречи ──────────────────────────────────────────────────────────
-@router.message(F.text == BTN_REQUEST_MEETING)
+@router.message(MenuButton(MENU_REQUEST_MEETING))
 async def request_start(
     message: Message, state: FSMContext, session: AsyncSession,
     organization: Organization, user: User, grants: dict[str, Grant],
+    features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     if not has_permission(grants, "calendar.read_free"):
         await message.answer("Запрашивать встречи может сотрудник организации.")
         return
@@ -673,10 +682,14 @@ async def kill_finish(
 
 
 # ── Быстрое совещание ───────────────────────────────────────────────────────
-@router.message(F.text == BTN_QUICK_MEETING)
+@router.message(MenuButton(MENU_QUICK_MEETING))
 async def quick_start(
-    message: Message, state: FSMContext, grants: dict[str, Grant]
+    message: Message, state: FSMContext, grants: dict[str, Grant],
+    features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     if not has_permission(grants, "meeting.create"):
         await message.answer("Собирать совещания может руководитель, ассистент или начальник отдела.")
         return
@@ -822,9 +835,17 @@ class TaskFromMeeting(StatesGroup):
 
 
 async def _meeting_or_none(session: AsyncSession, call: CallbackQuery, user: User):
+    """Встреча из нажатой кнопки — если она вообще открыта этому человеку.
+
+    Совпадение организации само по себе доступа не даёт: у рядового сотрудника
+    область права `meeting.read` — «только свои», и номер чужой встречи в
+    callback не должен открывать ни тему, ни состав участников.
+    """
     meeting_id = callback_int(call.data)
     meeting = await session.get(Meeting, meeting_id) if meeting_id else None
-    if meeting is None or meeting.organization_id != user.organization_id:
+    if meeting is None:
+        return None
+    if not await service.may_read(session, meeting=meeting, viewer=user):
         return None
     return meeting
 
@@ -1046,7 +1067,7 @@ async def task_save(
         return
 
     await state.clear()
-    when = f"\nСрок: {humanize_due(due_at, user.timezone)}" if due_at else ""
+    when = f"\nСрок: {humanize_due(due_at, user.timezone, user.locale)}" if due_at else ""
     await message.answer(
         f"➕ Поручение для {esc(assignee.full_name)}:\n<b>{esc(task.title)}</b>{when}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[

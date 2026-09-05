@@ -61,6 +61,7 @@ from app.models.enums import (
 from app.services import attendance, meetings, quotas, slots as slot_service
 from app.services.availability import set_state
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
+from app.services.rbac import load_grants, visible_department_ids
 
 TEST_ORG_PREFIX = "ТЕСТ "
 TZ = ZoneInfo("Asia/Tashkent")
@@ -1346,7 +1347,148 @@ async def main() -> None:
         check(calm.ok, "заявка в пределах нормы проходит", calm.reason or "")
         check(not calm.request.over_quota, "и пометки на ней нет")
 
-    print("\n30. Уборка не трогает боевые данные")
+    print("\n30. Встреча с участниками — одна встреча, а не несколько подряд")
+    async with session_scope() as session:
+        org_id, chief_id, _ = await test_people(session)
+        org = await session.get(Organization, org_id)
+        chief = await session.get(User, chief_id)
+
+        crowd_day = MONDAY + timedelta(days=42)
+        crowded = await busy(
+            session, chief, at(crowd_day, 9), at(crowd_day, 10), "ТЕСТ совещание на троих"
+        )
+        for number in range(3):
+            guest = await person(
+                session, org, f"ТЕСТ участник {number}",
+                RoleCode.EMPLOYEE, 941_000_000 + number,
+            )
+            session.add(MeetingParticipant(
+                meeting_id=crowded.id, user_id=guest.id,
+                role=ParticipantRole.REQUIRED, created_at=utcnow(),
+            ))
+        await session.flush()
+
+        # Запрос грузит встречу по строке на каждого участника. Если дубли
+        # доходят до счётчика «встреч подряд», одна встреча на троих читается
+        # как цепочка из четырёх, и окно сразу за буфером пропадает молча.
+        after = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            now=at(crowd_day, 8), limit=20,
+        )
+        check(
+            any(s.start == at(crowd_day, 10, 15) for s in after),
+            "окно сразу за буфером предлагается",
+            f"нашлось: {[local(s) for s in after[:4]]}",
+        )
+
+        # Обратная сторона: настоящая цепочка из трёх встреч предел всё так же
+        # держит. Без этой проверки исправление дублей могло бы снять лимит.
+        chain_day = MONDAY + timedelta(days=43)
+        await busy(session, chief, at(chain_day, 9), at(chain_day, 9, 30), "ТЕСТ подряд 1")
+        await busy(session, chief, at(chain_day, 9, 45), at(chain_day, 10, 15), "ТЕСТ подряд 2")
+        await busy(session, chief, at(chain_day, 10, 30), at(chain_day, 11), "ТЕСТ подряд 3")
+        await session.flush()
+
+        chained = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            now=at(chain_day, 8), limit=20,
+        )
+        check(
+            not any(s.start == at(chain_day, 11, 15) for s in chained),
+            "четвёртая встреча подряд не предлагается",
+            f"нашлось: {[local(s) for s in chained[:4]]}",
+        )
+        check(
+            any(s.start == at(chain_day, 11, 45) for s in chained),
+            "а после паузы окно снова открыто",
+            f"нашлось: {[local(s) for s in chained[:4]]}",
+        )
+
+    print("\n31. Карточка встречи и отметка явки закрыты для посторонних")
+    async with session_scope() as session:
+        org_id, chief_id, worker_id = await test_people(session)
+        org = await session.get(Organization, org_id)
+        chief = await session.get(User, chief_id)
+        insider = await session.get(User, worker_id)
+        outsider = await person(
+            session, org, "ТЕСТ посторонний", RoleCode.EMPLOYEE, 942_000_001
+        )
+
+        card_day = MONDAY + timedelta(days=44)
+        closed = await busy(
+            session, chief, at(card_day, 15), at(card_day, 15, 30), "ТЕСТ закрытая встреча"
+        )
+        session.add(MeetingParticipant(
+            meeting_id=closed.id, user_id=chief.id,
+            role=ParticipantRole.ORGANIZER, created_at=utcnow(),
+        ))
+        session.add(MeetingParticipant(
+            meeting_id=closed.id, user_id=insider.id,
+            role=ParticipantRole.REQUIRED, created_at=utcnow(),
+        ))
+        await session.flush()
+
+        check(
+            await meetings.may_read(session, meeting=closed, viewer=chief),
+            "ведущий открывает карточку своей встречи",
+        )
+        check(
+            await meetings.may_read(session, meeting=closed, viewer=insider),
+            "участник открывает карточку своей встречи",
+        )
+        check(
+            not await meetings.may_read(session, meeting=closed, viewer=outsider),
+            "сотрудник со стороны карточку не открывает",
+        )
+
+        # Право на запись описано дважды: проверкой записи и условием запроса.
+        # Расходятся они молча, поэтому сверяются прогоном по матрице
+        # «встреча × человек» — так же, как для документов в блоке 4.
+        all_meetings = (
+            await session.execute(select(Meeting).where(Meeting.organization_id == org_id))
+        ).scalars().all()
+        for viewer in (chief, insider, outsider):
+            grants = await load_grants(session, viewer)
+            departments = await visible_department_ids(session, viewer)
+            in_query = set(
+                (
+                    await session.execute(
+                        select(Meeting.id).where(
+                            *meetings.visible_filter(viewer, grants, departments)
+                        )
+                    )
+                ).scalars().all()
+            )
+            mismatch = []
+            for candidate in all_meetings:
+                direct = await meetings.may_read(
+                    session, meeting=candidate, viewer=viewer
+                )
+                if direct != (candidate.id in in_query):
+                    mismatch.append(candidate.id)
+            check(
+                not mismatch,
+                f"проверка записи и условие запроса совпадают: {viewer.full_name}",
+                f"разошлись на встречах {mismatch[:5]} из {len(all_meetings)}",
+            )
+
+        moment = at(card_day, 15, 5)
+        ok, why = await attendance.check_in(
+            session, meeting=closed, user=outsider, now=moment
+        )
+        check(not ok, "посторонний не отмечается на чужой встрече", why or "прошло")
+        ok, why = await attendance.check_in(
+            session, meeting=closed, user=insider, now=moment
+        )
+        check(ok, "участник отмечается", why or "")
+        marks = await session.scalar(
+            select(func.count(MeetingAttendance.id)).where(
+                MeetingAttendance.meeting_id == closed.id
+            )
+        )
+        check(marks == 1, "в журнале явки ровно одна запись", f"записей: {marks}")
+
+    print("\n32. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

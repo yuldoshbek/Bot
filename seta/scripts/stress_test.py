@@ -50,6 +50,7 @@ from app.models import (
     DecisionStatus,
     Document,
     DocumentScope,
+    FeatureFlag,
     DocumentView,
     Meeting,
     MeetingAttendance,
@@ -68,11 +69,13 @@ from app.models import (
     TaskEvent,
     TaskExtension,
     TaskStatus,
+    TaskTemplate,
     User,
     UserRole,
     UserStatus,
     WorkingHours,
 )
+from app.services import features
 from app.services import slots as slot_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.tasks import create_task
@@ -337,6 +340,12 @@ async def cleanup() -> None:
                 for model in (TaskEvent, TaskComment, TaskExtension):
                     await session.execute(delete(model).where(model.task_id.in_(task_ids)))
                 await session.execute(delete(Task).where(Task.id.in_(task_ids)))
+            await session.execute(
+                delete(TaskTemplate).where(TaskTemplate.organization_id.in_(org_ids))
+            )
+            await session.execute(
+                delete(FeatureFlag).where(FeatureFlag.organization_id.in_(org_ids))
+            )
             # Встречи держат ссылки на людей из нескольких колонок сразу
             # (владелец, автор, от чьего имени), поэтому убираются целиком
             # по организации, а не по одной из этих ссылок.
@@ -918,13 +927,146 @@ async def main() -> None:
     exports = [c for c in net.calls if c[0] == "SendDocument"]
     check(bool(exports), "и файл действительно отправлен", f"отправок: {len(exports)}")
 
-    print("\n22. Ответы бота и отзывчивость")
+    print("\n22. Шаблоны поручений под нагрузкой")
+    # Экран «Поручение» теперь начинается со списка шаблонов — он не должен
+    # ронять создание поручения ни при наличии шаблонов, ни без них.
+    error = await hit(text_update(bot, TG["chief"], "➕ Поручение"))
+    check(not error, "экран создания открывается без шаблонов", error or "")
+
+    async with session_scope() as session:
+        # Любое поручение организации: руководитель видит их все, а шаблон
+        # заводится из карточки, которая ему открыта.
+        # ORDER BY обязателен: без него PostgreSQL отдаёт строку в том порядке,
+        # в каком она лежит на диске, и выбор менялся от прогона к прогону —
+        # в зависимости от того, что запускалось раньше. Проверка то проходила,
+        # то нет, и выглядела случайной.
+        task_id = await session.scalar(
+            select(Task.id).where(Task.organization_id == ids["org"])
+            .order_by(Task.id).limit(1)
+        )
+    check(task_id is not None, "в организации есть поручение для шаблона", str(task_id))
+    if task_id:
+        errors = [
+            await hit(callback_update(bot, TG["chief"], f"tt:save:{task_id}"))
+            for _ in range(10)
+        ]
+        check(not any(errors), "десять нажатий «Сохранить как шаблон» не уронили бота",
+              str(next((e for e in errors if e), "")))
+        # Отсутствие исключений — половина ответа. Вторая половина: десять
+        # нажатий одной кнопки не должны оставить десять записей.
+        async with session_scope() as session:
+            made = await session.scalar(
+                select(func.count(TaskTemplate.id)).where(
+                    TaskTemplate.organization_id == ids["org"]
+                )
+            )
+        check(int(made or 0) == 1, "и завели ровно один шаблон, а не десять", f"их {made}")
+
+    async with session_scope() as session:
+        template_id = await session.scalar(
+            select(TaskTemplate.id)
+            .where(TaskTemplate.organization_id == ids["org"])
+            .limit(1)
+        )
+    check(template_id is not None, "шаблон завёлся через бота", str(template_id))
+
+    if template_id:
+        errors = [
+            await hit(callback_update(bot, TG["chief"], f"tt:use:{template_id}"))
+            for _ in range(10)
+        ]
+        check(not any(errors), "десять применений шаблона подряд не уронили бота",
+              str(next((e for e in errors if e), "")))
+        async with session_scope() as session:
+            template_title = await session.scalar(
+                select(TaskTemplate.title).where(TaskTemplate.id == template_id)
+            )
+            born = await session.scalar(
+                select(func.count(Task.id)).where(
+                    Task.organization_id == ids["org"],
+                    Task.title == template_title,
+                    Task.status == TaskStatus.NEW,
+                    # Само поручение, из которого сделан шаблон, носит то же
+                    # название и тоже бывает в статусе «Новое». Без этой строки
+                    # проверка считала его вместе с созданными и находила два
+                    # там, где создано одно.
+                    Task.id != task_id,
+                )
+            )
+        check(int(born or 0) == 1, "и создали одно поручение, а не десять", f"их {born}")
+        # Чужой человек и подставленные идентификаторы: обработчик обязан
+        # ответить отказом, а не исключением.
+        alien = await hit(callback_update(bot, TG["worker"], f"tt:drop:{template_id}"))
+        check(not alien, "сотрудник не уронил обработчик, удаляя чужой шаблон", alien or "")
+
+    for data in ("tt:use:999999999", "tt:drop:0", "tt:save:abc", "tt:use:", "tt:list"):
+        error = await hit(callback_update(bot, TG["chief"], data))
+        check(not error, f"подставленное «{data}» не уронило бота", error or "")
+
+    print("\n23. Выключенный раздел закрыт в обработчике, а не только в меню")
+    # Кнопка исчезает из меню, но старая кнопка лежит в истории чата и жмётся,
+    # а callback подставляется. Значит, проверяется не меню, а сам обработчик:
+    # ниже раздел выключается и в него стучатся настоящим обновлением.
+    async with session_scope() as session:
+        admin_user = await session.get(User, ids["chief"])
+        problem = await features.switch(
+            session, organization_id=ids["org"], code="meetings",
+            enabled=False, actor=admin_user,
+        )
+    check(problem is None, "раздел встреч выключен", problem or "")
+
+    # Диалог мог остаться в состоянии прошлого раздела: тогда текст съест
+    # его обработчик, и проверка измерит не то. /start сбрасывает состояние.
+    await hit(text_update(bot, TG["chief"], "/start"))
+
+    before = len(net.calls)
+    error = await hit(text_update(bot, TG["chief"], "📅 Мой день"))
+    check(not error, "обработчик не упал на выключенном разделе", error or "")
+    answers = [
+        call[1].get("text", "")
+        for call in net.calls[before:]
+        if call[0] == "SendMessage"
+    ]
+    check(
+        any(features.OFF_MESSAGE in text for text in answers),
+        "и ответил, что раздел выключен",
+        str(answers[:1]),
+    )
+    check(
+        not any("Мой день" in text for text in answers),
+        "а сам экран не открылся",
+        str(answers[:1]),
+    )
+
+    async with session_scope() as session:
+        admin_user = await session.get(User, ids["chief"])
+        await features.switch(
+            session, organization_id=ids["org"], code="meetings",
+            enabled=True, actor=admin_user,
+        )
+    before = len(net.calls)
+    error = await hit(text_update(bot, TG["chief"], "📅 Мой день"))
+    check(not error, "после включения обработчик снова работает", error or "")
+    answers = [
+        call[1].get("text", "")
+        for call in net.calls[before:]
+        if call[0] == "SendMessage"
+    ]
+    check(
+        any("Мой день" in text for text in answers),
+        "и экран открылся",
+        str(answers[:1])[:120],
+    )
+
+    print("\n24. Ответы бота и отзывчивость")
     check(
         not net.errors,
         "за весь прогон ни одно сообщение не было отвергнуто Telegram",
         "; ".join(net.errors[:3]),
     )
     slow = [t for t in timings if t > 1.0]
+    if slow:
+        print(f"       медленные обновления: {[round(t, 2) for t in slow]}")
     average = sum(timings) / len(timings) if timings else 0
     check(
         average < 0.5,

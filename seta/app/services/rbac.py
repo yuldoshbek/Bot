@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.timeutil import utcnow
 from app.models.enums import RoleCode, Scope
 from app.models.org import Department
@@ -174,6 +175,30 @@ ROLE_TITLES: dict[RoleCode, str] = {
     RoleCode.ADMIN: "Администратор",
     RoleCode.AUDITOR: "Аудитор",
 }
+
+
+
+def role_title(code: RoleCode | str, locale: str | None = None) -> str:
+    """Название роли на языке человека.
+
+    `ROLE_TITLES` остаётся: им заполняется справочник ролей в базе при
+    развёртывании, и там нужно одно название, а не три. На экран же роль
+    выводится через этот вызов — иначе узбекский интерфейс показывал бы
+    «Начальник отдела» посреди узбекского текста.
+    """
+    value = code.value if isinstance(code, RoleCode) else str(code)
+    return t(f"role.{value.lower()}", locale)
+
+
+def role_titles(roles: set[RoleCode], locale: str | None = None) -> str:
+    """Роли одного человека одной строкой, в устойчивом порядке.
+
+    Порядок задан явно: множество ролей перебирается в произвольном порядке,
+    и без сортировки один и тот же человек видел бы их каждый раз по-новому.
+    """
+    listed = [role_title(r, locale) for r in sorted(roles, key=lambda r: r.value)]
+    return ", ".join(listed) or t("role.none", locale)
+
 
 # Роли, которые нельзя получить самостоятельной регистрацией.
 ELEVATED_ROLES: set[RoleCode] = {
