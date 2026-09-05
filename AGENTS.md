@@ -42,14 +42,14 @@
 ```bash
 cd seta
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
-for check in smoke_block1 smoke_block2 smoke_hardening \
-             smoke_block3 smoke_block4 stress_test; do
+for check in smoke_block1 smoke_block2 smoke_hardening smoke_block3 \
+             smoke_block4 smoke_block5 stress_test; do
   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
     run --rm --no-deps migrate python scripts/$check.py
 done
 ```
 
-Все шесть должны показать `Ошибок: 0` — суммарно 547 проверок.
+Все семь должны показать `Ошибок: 0` — суммарно 587 проверок.
 Если нет — сначала чини, потом делай новое.
 
 ## Что делать в конце работы
