@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import delete, func, select
 
 from app.core.db import session_scope
+from app.core.dates import parse_due
+from app.core.timeutil import utcnow
 from app.models import (
     Absence,
     AuditLog,
@@ -42,6 +44,7 @@ from app.models import (
     TaskEvent,
     TaskExtension,
     TaskStatus,
+    TaskTemplate,
     TimeQuota,
     User,
     UserRole,
@@ -56,7 +59,7 @@ from app.models.enums import (
     RoleCode,
     TaskEventKind,
 )
-from app.services import analytics, dashboard, digest
+from app.services import analytics, dashboard, digest, templates
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
 
@@ -142,6 +145,9 @@ async def cleanup() -> None:
             delete(Notification).where(Notification.organization_id.in_(org_ids))
         )
         await session.execute(delete(Decision).where(Decision.organization_id.in_(org_ids)))
+        await session.execute(
+            delete(TaskTemplate).where(TaskTemplate.organization_id.in_(org_ids))
+        )
         await session.execute(delete(Task).where(Task.organization_id.in_(org_ids)))
         if meeting_ids:
             await session.execute(delete(Meeting).where(Meeting.id.in_(meeting_ids)))
@@ -941,7 +947,233 @@ async def stage_five() -> None:
             "а руководителю этот блок не нужен: состав сводок разный",
         )
 
-    print("\n26. Уборка не трогает боевые данные")
+    print("\n26. Шаблон: срок считается от дня применения")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        grants = await load_grants(session, chief)
+
+        made = await templates.create(
+            session, actor=chief, grants=grants,
+            title="ТЕСТ еженедельный отчёт", description="ТЕСТ по форме",
+            priority=Priority.NORMAL, days=3, assignee=worker,
+        )
+        check(made.ok, "шаблон заведён", made.reason or "")
+        template = made.item
+
+        # Дважды применяем один шаблон с разницей в десять дней. Срок обязан
+        # съехать ровно на столько же: дата, вшитая в шаблон, через месяц
+        # рождала бы поручения просроченными с первой минуты.
+        first_day = at(MONDAY, 9)
+        later_day = at(MONDAY + timedelta(days=10), 9)
+        first = await templates.apply(
+            session, template=template, actor=chief, grants=grants, now=first_day
+        )
+        check(first.ok, "поручение из шаблона создано", first.reason or "")
+        second = await templates.apply(
+            session, template=template, actor=chief, grants=grants, now=later_day
+        )
+        check(second.ok, "и второе, десятью днями позже", second.reason or "")
+        gap = (second.item.due_at - first.item.due_at).days
+        check(gap == 10, "срок съехал ровно на десять дней", f"разница {gap} дн.")
+
+        check(
+            not second.duplicate,
+            "применение через десять дней дублем не считается",
+        )
+
+        # Двойное нажатие проверяется настоящими часами, а не подставными:
+        # `created_at` поручению ставит база по реальному времени, и окно
+        # «свежести» сравнивается именно с ним. Подставить сюда ноябрь значит
+        # проверить не то, что работает в бою.
+        rapid = await templates.create(
+            session, actor=chief, grants=grants,
+            title="ТЕСТ двойное нажатие", days=1, assignee=worker,
+        )
+        check(rapid.ok, "заведён шаблон для проверки повтора", rapid.reason or "")
+        once = await templates.apply(
+            session, template=rapid.item, actor=chief, grants=grants
+        )
+        again = await templates.apply(
+            session, template=rapid.item, actor=chief, grants=grants
+        )
+        check(once.ok and not once.duplicate, "первое нажатие создаёт поручение")
+        check(again.ok and again.duplicate, "второе подряд — то же самое",
+              f"duplicate={again.duplicate}")
+        check(again.item.id == once.item.id, "и это ровно та же запись",
+              f"{again.item.id} против {once.item.id}")
+        born = await session.scalar(
+            select(func.count(Task.id)).where(Task.title == "ТЕСТ двойное нажатие")
+        )
+        check(int(born or 0) == 1, "в базе одно поручение, а не два", f"{born}")
+
+        # А за пределами окна повтор снова становится намерением. Момент
+        # отсчитывается от настоящего времени: `created_at` у поручения
+        # реальный, и сравнивать его с ноябрём подставной проверки бесполезно —
+        # тогда окно любого размера не сработает и проверка ничего не докажет.
+        # Двадцать минут записаны числом, а не через `templates.DOUBLE_TAP`:
+        # проверка, читающая ту же константу, что проверяет, подтверждает
+        # только механизм и молча принимает любое её значение — хоть месяц.
+        later = utcnow() + timedelta(minutes=20)
+        beyond = await templates.apply(
+            session, template=rapid.item, actor=chief, grants=grants, now=later
+        )
+        check(
+            beyond.ok and not beyond.duplicate,
+            "через двадцать минут это уже второе намерение",
+            f"duplicate={beyond.duplicate}, окно {templates.DOUBLE_TAP}",
+        )
+        after = await session.scalar(
+            select(func.count(Task.id)).where(Task.title == "ТЕСТ двойное нажатие")
+        )
+        check(int(after or 0) == 2, "и теперь их два", f"{after}")
+        same_template = await templates.create(
+            session, actor=chief, grants=grants,
+            title="ТЕСТ еженедельный отчёт", days=3, assignee=worker,
+        )
+        check(
+            same_template.ok and same_template.duplicate,
+            "и второй шаблон с тем же названием не заводится",
+            f"ok={same_template.ok}, duplicate={same_template.duplicate}",
+        )
+
+        # Тот же срок, набранный руками, обязан дать ту же дату: два способа
+        # задать «через три дня» с разными ответами объяснить нечем.
+        by_hand = parse_due("через 3 дня", chief.timezone, now=first_day)
+        check(
+            first.item.due_at == by_hand,
+            "срок из шаблона совпадает с набранным руками",
+            f"{first.item.due_at} против {by_hand}",
+        )
+
+    print("\n27. Поручение из шаблона неотличимо от созданного руками")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        grants = await load_grants(session, chief)
+        template = (
+            await session.execute(
+                select(TaskTemplate).where(TaskTemplate.title == "ТЕСТ еженедельный отчёт")
+            )
+        ).scalar_one()
+
+        result = await templates.apply(
+            session, template=template, actor=chief, grants=grants, now=at(MONDAY, 9)
+        )
+        task = result.item
+        check(task.status == TaskStatus.NEW, "статус обычный", task.status)
+        check(task.creator_id == chief.id, "автор — тот, кто применил")
+        check(task.assignee_id == worker.id, "исполнитель из шаблона")
+        check(task.department_id == worker.department_id, "отдел проставлен от исполнителя")
+        events = await session.scalar(
+            select(func.count(TaskEvent.id)).where(
+                TaskEvent.task_id == task.id, TaskEvent.kind == TaskEventKind.CREATED
+            )
+        )
+        check(int(events or 0) == 1, "запись о создании в истории есть", f"{events}")
+        logged = await session.scalar(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.entity_type == "task", AuditLog.entity_id == task.id,
+                AuditLog.action == "task.create",
+            )
+        )
+        check(int(logged or 0) == 1, "и запись в журнале аудита", f"{logged}")
+        applied = await session.scalar(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.entity_id == task.id, AuditLog.action == "template.apply"
+            )
+        )
+        check(int(applied or 0) == 1, "плюс отдельная запись о применении шаблона", f"{applied}")
+
+    print("\n28. Шаблон не обходит область права")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker, head = who["руководитель"], who["сотрудник"], who["начальник"]
+        worker_grants = await load_grants(session, worker)
+        template = (
+            await session.execute(
+                select(TaskTemplate).where(TaskTemplate.title == "ТЕСТ еженедельный отчёт")
+            )
+        ).scalar_one()
+
+        # Шаблон заведён руководителем и указывает на сотрудника. Другой
+        # сотрудник с областью «только свои» применить его к нему не может.
+        alien = await person(
+            session, await session.get(Organization, chief.organization_id),
+            "ТЕСТ Посторонний", RoleCode.EMPLOYEE, 965_000_001, worker.department_id,
+        )
+        alien_grants = await load_grants(session, alien)
+        refused = await templates.apply(
+            session, template=template, actor=alien, grants=alien_grants, now=at(MONDAY, 9)
+        )
+        check(
+            not refused.ok,
+            "сотрудник не поручает чужому через шаблон",
+            refused.reason or "прошло",
+        )
+        # А себе — может: область «только свои» это и означает.
+        to_self = await templates.apply(
+            session, template=template, actor=alien, grants=alien_grants,
+            assignee=alien, now=at(MONDAY, 9),
+        )
+        check(to_self.ok, "а себе поручает", to_self.reason or "")
+
+        # Шаблон другой организации не применяется вовсе.
+        other_org = Organization(name=f"{TEST_ORG_PREFIX}Соседи", timezone="Asia/Tashkent")
+        session.add(other_org)
+        await session.flush()
+        stranger = await person(
+            session, other_org, "ТЕСТ Сосед", RoleCode.EXECUTIVE, 966_000_001
+        )
+        cross = await templates.apply(
+            session, template=template, actor=stranger,
+            grants=await load_grants(session, stranger), now=at(MONDAY, 9),
+        )
+        check(not cross.ok, "и чужой организации он не открыт", cross.reason or "прошло")
+
+    print("\n29. Правит шаблон автор или администратор")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        template = (
+            await session.execute(
+                select(TaskTemplate).where(TaskTemplate.title == "ТЕСТ еженедельный отчёт")
+            )
+        ).scalar_one()
+
+        check(
+            await templates.may_edit(session, template=template, actor=chief),
+            "автор шаблона правит его",
+        )
+        check(
+            not await templates.may_edit(session, template=template, actor=worker),
+            "посторонний — нет",
+        )
+        refused = await templates.remove(session, template=template, actor=worker)
+        check(refused is not None, "и удалить не может", refused or "удалил")
+
+        admin = await person(
+            session, await session.get(Organization, chief.organization_id),
+            "ТЕСТ Админ", RoleCode.ADMIN, 967_000_001,
+        )
+        check(
+            await templates.may_edit(session, template=template, actor=admin),
+            "администратор правит любой шаблон",
+        )
+        gone = await templates.remove(session, template=template, actor=admin)
+        check(gone is None, "и удаляет его", gone or "")
+        left = await session.scalar(
+            select(func.count(TaskTemplate.id)).where(TaskTemplate.id == template.id)
+        )
+        check(int(left or 0) == 0, "шаблон действительно удалён", f"{left}")
+        # Поручения, созданные по шаблону, удаление не трогает: они уже живут
+        # своей жизнью, и терять их вместе с заготовкой было бы бедствием.
+        alive = await session.scalar(
+            select(func.count(Task.id)).where(Task.title == "ТЕСТ еженедельный отчёт")
+        )
+        check(int(alive or 0) >= 2, "а созданные по нему поручения остались", f"{alive}")
+
+    print("\n30. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

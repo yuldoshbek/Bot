@@ -33,7 +33,14 @@ from app.models.task import Task, TaskComment, TaskEvent, TaskExtension
 from app.models.user import User
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
-from app.services.rbac import Grant, Scope, has_permission, user_role_codes, visible_department_ids
+from app.services.rbac import (
+    Grant,
+    Scope,
+    can_access_object,
+    has_permission,
+    user_role_codes,
+    visible_department_ids,
+)
 
 # Статусы, в которых поручение считается живым.
 ACTIVE_STATUSES = (
@@ -117,6 +124,30 @@ async def resolve_reviewer(
         )
     ).scalar_one_or_none()
     return assistant.id if assistant else creator.id
+
+
+async def may_assign_to(
+    session: AsyncSession, *, actor: User, grants: dict[str, Grant], assignee: User
+) -> bool:
+    """Вправе ли этот человек поручать этому.
+
+    Живёт в службе, а не в обработчике: то же правило нужно при создании
+    поручения из шаблона и из встречи. Три места с одной проверкой разошлись бы
+    молча — и разошлись бы именно там, где право `task.create` есть у всех,
+    а область у каждого своя.
+    """
+    if assignee.organization_id != actor.organization_id:
+        return False
+    if assignee.status != UserStatus.ACTIVE:
+        return False
+    return await can_access_object(
+        session,
+        actor,
+        grants,
+        "task.create",
+        owner_id=assignee.id,
+        department_id=assignee.department_id,
+    )
 
 
 def default_requires_review(priority: Priority) -> bool:

@@ -31,11 +31,17 @@ MONTHS: dict[str, int] = {
 }
 
 
-def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
+def parse_due(
+    text: str, tz_name: str | None = None, *, now: datetime | None = None
+) -> datetime | None:
     """Превращает текст в срок (UTC). Возвращает None, если понять не удалось.
 
     Понимает: сегодня, завтра, послезавтра, день недели, «через N дней»,
     05.09, 05.09.2026, «5 сентября». Время по умолчанию - конец рабочего дня.
+
+    `now` подставляется явно там, где точку отсчёта нельзя брать из часов
+    машины: шаблон поручения считает срок от дня применения, и проверка обязана
+    уметь задать этот день. Без параметра берётся текущий момент, как раньше.
     """
     if not text:
         return None
@@ -44,7 +50,7 @@ def parse_due(text: str, tz_name: str | None = None) -> datetime | None:
     raw = re.sub(r"^(до|к|на)\s+", "", raw)
 
     tz = ZoneInfo(tz_name or settings.default_timezone)
-    now_local = to_local(datetime.now(tz=tz), tz_name)
+    now_local = to_local(now or datetime.now(tz=tz), tz_name)
 
     # Время указано отдельно: «завтра 15:00».
     # Только через двоеточие: точка означает дату, иначе «05.09» превращается в 05:09.

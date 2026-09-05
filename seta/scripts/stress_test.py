@@ -68,6 +68,7 @@ from app.models import (
     TaskEvent,
     TaskExtension,
     TaskStatus,
+    TaskTemplate,
     User,
     UserRole,
     UserStatus,
@@ -337,6 +338,9 @@ async def cleanup() -> None:
                 for model in (TaskEvent, TaskComment, TaskExtension):
                     await session.execute(delete(model).where(model.task_id.in_(task_ids)))
                 await session.execute(delete(Task).where(Task.id.in_(task_ids)))
+            await session.execute(
+                delete(TaskTemplate).where(TaskTemplate.organization_id.in_(org_ids))
+            )
             # Встречи держат ссылки на людей из нескольких колонок сразу
             # (владелец, автор, от чьего имени), поэтому убираются целиком
             # по организации, а не по одной из этих ссылок.
@@ -918,7 +922,73 @@ async def main() -> None:
     exports = [c for c in net.calls if c[0] == "SendDocument"]
     check(bool(exports), "и файл действительно отправлен", f"отправок: {len(exports)}")
 
-    print("\n22. Ответы бота и отзывчивость")
+    print("\n22. Шаблоны поручений под нагрузкой")
+    # Экран «Поручение» теперь начинается со списка шаблонов — он не должен
+    # ронять создание поручения ни при наличии шаблонов, ни без них.
+    error = await hit(text_update(bot, TG["chief"], "➕ Поручение"))
+    check(not error, "экран создания открывается без шаблонов", error or "")
+
+    async with session_scope() as session:
+        # Любое поручение организации: руководитель видит их все, а шаблон
+        # заводится из карточки, которая ему открыта.
+        task_id = await session.scalar(
+            select(Task.id).where(Task.organization_id == ids["org"]).limit(1)
+        )
+    check(task_id is not None, "в организации есть поручение для шаблона", str(task_id))
+    if task_id:
+        errors = [
+            await hit(callback_update(bot, TG["chief"], f"tt:save:{task_id}"))
+            for _ in range(10)
+        ]
+        check(not any(errors), "десять нажатий «Сохранить как шаблон» не уронили бота",
+              str(next((e for e in errors if e), "")))
+        # Отсутствие исключений — половина ответа. Вторая половина: десять
+        # нажатий одной кнопки не должны оставить десять записей.
+        async with session_scope() as session:
+            made = await session.scalar(
+                select(func.count(TaskTemplate.id)).where(
+                    TaskTemplate.organization_id == ids["org"]
+                )
+            )
+        check(int(made or 0) == 1, "и завели ровно один шаблон, а не десять", f"их {made}")
+
+    async with session_scope() as session:
+        template_id = await session.scalar(
+            select(TaskTemplate.id)
+            .where(TaskTemplate.organization_id == ids["org"])
+            .limit(1)
+        )
+    check(template_id is not None, "шаблон завёлся через бота", str(template_id))
+
+    if template_id:
+        errors = [
+            await hit(callback_update(bot, TG["chief"], f"tt:use:{template_id}"))
+            for _ in range(10)
+        ]
+        check(not any(errors), "десять применений шаблона подряд не уронили бота",
+              str(next((e for e in errors if e), "")))
+        async with session_scope() as session:
+            template_title = await session.scalar(
+                select(TaskTemplate.title).where(TaskTemplate.id == template_id)
+            )
+            born = await session.scalar(
+                select(func.count(Task.id)).where(
+                    Task.organization_id == ids["org"],
+                    Task.title == template_title,
+                    Task.status == TaskStatus.NEW,
+                )
+            )
+        check(int(born or 0) == 1, "и создали одно поручение, а не десять", f"их {born}")
+        # Чужой человек и подставленные идентификаторы: обработчик обязан
+        # ответить отказом, а не исключением.
+        alien = await hit(callback_update(bot, TG["worker"], f"tt:drop:{template_id}"))
+        check(not alien, "сотрудник не уронил обработчик, удаляя чужой шаблон", alien or "")
+
+    for data in ("tt:use:999999999", "tt:drop:0", "tt:save:abc", "tt:use:", "tt:list"):
+        error = await hit(callback_update(bot, TG["chief"], data))
+        check(not error, f"подставленное «{data}» не уронило бота", error or "")
+
+    print("\n23. Ответы бота и отзывчивость")
     check(
         not net.errors,
         "за весь прогон ни одно сообщение не было отвергнуто Telegram",

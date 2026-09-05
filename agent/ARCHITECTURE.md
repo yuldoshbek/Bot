@@ -36,7 +36,7 @@ seta/
     services/   rbac, registration, availability, tasks, deadlines, notifications,
                 bootstrap, audit, health, slots, meetings, attendance, quotas,
                 decisions, documents, indexer, search, briefing, export,
-                analytics, dashboard, digest
+                analytics, dashboard, digest, templates
     bot/        loader, run, utils, middlewares/auth, handlers/*, keyboards/*
     workers/    runner.py: пять циклов — доставка, сроки, встречи, сводки, документы
     api/        main.py: вебхук + /health, health_page: страница состояния
@@ -79,7 +79,7 @@ seta/
 | `task_events` | История: кто, что и когда изменил |
 | `task_comments` | Обсуждение и файлы внутри поручения |
 | `task_extensions` | Запросы на перенос срока. Частичный уникальный индекс: один открытый запрос на поручение |
-| `task_templates` | Типовые поручения (интерфейса пока нет) |
+| `task_templates` | Типовые поручения: заготовка текста, приоритета и срока «через N дней» |
 | `notifications` | Очередь. `event_key` уникален — защита от дублей в схеме; `next_attempt_at` — откат при сбоях |
 | `error_log` | Что сломалось: тип, сообщение, трассировка, действие человека. Показывается на `/health` |
 
