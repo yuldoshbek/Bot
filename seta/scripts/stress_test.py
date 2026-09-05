@@ -50,6 +50,7 @@ from app.models import (
     DecisionStatus,
     Document,
     DocumentScope,
+    FeatureFlag,
     DocumentView,
     Meeting,
     MeetingAttendance,
@@ -74,6 +75,7 @@ from app.models import (
     UserStatus,
     WorkingHours,
 )
+from app.services import features
 from app.services import slots as slot_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.tasks import create_task
@@ -340,6 +342,9 @@ async def cleanup() -> None:
                 await session.execute(delete(Task).where(Task.id.in_(task_ids)))
             await session.execute(
                 delete(TaskTemplate).where(TaskTemplate.organization_id.in_(org_ids))
+            )
+            await session.execute(
+                delete(FeatureFlag).where(FeatureFlag.organization_id.in_(org_ids))
             )
             # Встречи держат ссылки на людей из нескольких колонок сразу
             # (владелец, автор, от чьего имени), поэтому убираются целиком
@@ -988,13 +993,70 @@ async def main() -> None:
         error = await hit(callback_update(bot, TG["chief"], data))
         check(not error, f"подставленное «{data}» не уронило бота", error or "")
 
-    print("\n23. Ответы бота и отзывчивость")
+    print("\n23. Выключенный раздел закрыт в обработчике, а не только в меню")
+    # Кнопка исчезает из меню, но старая кнопка лежит в истории чата и жмётся,
+    # а callback подставляется. Значит, проверяется не меню, а сам обработчик:
+    # ниже раздел выключается и в него стучатся настоящим обновлением.
+    async with session_scope() as session:
+        admin_user = await session.get(User, ids["chief"])
+        problem = await features.switch(
+            session, organization_id=ids["org"], code="meetings",
+            enabled=False, actor=admin_user,
+        )
+    check(problem is None, "раздел встреч выключен", problem or "")
+
+    # Диалог мог остаться в состоянии прошлого раздела: тогда текст съест
+    # его обработчик, и проверка измерит не то. /start сбрасывает состояние.
+    await hit(text_update(bot, TG["chief"], "/start"))
+
+    before = len(net.calls)
+    error = await hit(text_update(bot, TG["chief"], "📅 Мой день"))
+    check(not error, "обработчик не упал на выключенном разделе", error or "")
+    answers = [
+        call[1].get("text", "")
+        for call in net.calls[before:]
+        if call[0] == "SendMessage"
+    ]
+    check(
+        any(features.OFF_MESSAGE in text for text in answers),
+        "и ответил, что раздел выключен",
+        str(answers[:1]),
+    )
+    check(
+        not any("Мой день" in text for text in answers),
+        "а сам экран не открылся",
+        str(answers[:1]),
+    )
+
+    async with session_scope() as session:
+        admin_user = await session.get(User, ids["chief"])
+        await features.switch(
+            session, organization_id=ids["org"], code="meetings",
+            enabled=True, actor=admin_user,
+        )
+    before = len(net.calls)
+    error = await hit(text_update(bot, TG["chief"], "📅 Мой день"))
+    check(not error, "после включения обработчик снова работает", error or "")
+    answers = [
+        call[1].get("text", "")
+        for call in net.calls[before:]
+        if call[0] == "SendMessage"
+    ]
+    check(
+        any("Мой день" in text for text in answers),
+        "и экран открылся",
+        str(answers[:1])[:120],
+    )
+
+    print("\n24. Ответы бота и отзывчивость")
     check(
         not net.errors,
         "за весь прогон ни одно сообщение не было отвергнуто Telegram",
         "; ".join(net.errors[:3]),
     )
     slow = [t for t in timings if t > 1.0]
+    if slow:
+        print(f"       медленные обновления: {[round(t, 2) for t in slow]}")
     average = sum(timings) / len(timings) if timings else 0
     check(
         average < 0.5,

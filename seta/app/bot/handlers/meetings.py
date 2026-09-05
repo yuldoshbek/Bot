@@ -35,6 +35,7 @@ from app.models.user import User
 from app.models.rbac import Role, UserRole
 from app.core.dates import humanize_due, parse_due
 from app.services import attendance, dashboard, meetings as service, quotas
+from app.services import features as feature_service
 from app.services import decisions as registry
 from app.services import documents as document_service
 from app.services import tasks as task_service
@@ -249,16 +250,29 @@ def _day_kb(board: dashboard.Board) -> InlineKeyboardMarkup | None:
 
 @router.message(F.text == BTN_MY_DAY)
 async def my_day(
-    message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
+    message: Message, session: AsyncSession, user: User,
+    grants: dict[str, Grant], features: dict[str, bool],
 ) -> None:
-    board = await dashboard.build(session, viewer=user, grants=grants)
+    # Выключенный раздел закрывается здесь, а не только в меню: кнопка,
+    # отправленная час назад, всё ещё лежит в истории чата и нажимается.
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
+    board = await dashboard.build(
+        session, viewer=user, grants=grants, features=features
+    )
     # Текст собирает служба: этот же экран уходит утренней сводкой, и два
     # описания одного экрана разошлись бы молча.
     await message.answer(dashboard.render(board), reply_markup=_day_kb(board))
 
 
 @router.message(F.text == BTN_MY_MEETINGS)
-async def my_meetings(message: Message, session: AsyncSession, user: User) -> None:
+async def my_meetings(
+    message: Message, session: AsyncSession, user: User, features: dict[str, bool]
+) -> None:
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     now = utcnow()
     upcoming = await _my_meetings(session, user, since=now, until=now + timedelta(days=14))
     if not upcoming:
@@ -303,7 +317,11 @@ async def meeting_card(
 async def request_start(
     message: Message, state: FSMContext, session: AsyncSession,
     organization: Organization, user: User, grants: dict[str, Grant],
+    features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     if not has_permission(grants, "calendar.read_free"):
         await message.answer("Запрашивать встречи может сотрудник организации.")
         return
@@ -665,8 +683,12 @@ async def kill_finish(
 # ── Быстрое совещание ───────────────────────────────────────────────────────
 @router.message(F.text == BTN_QUICK_MEETING)
 async def quick_start(
-    message: Message, state: FSMContext, grants: dict[str, Grant]
+    message: Message, state: FSMContext, grants: dict[str, Grant],
+    features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "meetings"):
+        await message.answer(feature_service.OFF_MESSAGE)
+        return
     if not has_permission(grants, "meeting.create"):
         await message.answer("Собирать совещания может руководитель, ассистент или начальник отдела.")
         return

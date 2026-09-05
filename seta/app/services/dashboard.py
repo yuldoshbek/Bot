@@ -41,6 +41,7 @@ from app.models import (
 )
 from app.models.org import Department
 from app.services import analytics, quotas
+from app.services import features as feature_service
 from app.services import slots as slot_service
 from app.services.analytics import Metric
 from app.services.rbac import Grant, has_permission
@@ -110,6 +111,7 @@ async def build(
     grants: dict[str, Grant],
     now: datetime | None = None,
     with_metrics: bool = True,
+    features: dict[str, bool] | None = None,
 ) -> Board:
     """Собирает экран. Каждый блок — один запрос, ни одного внутри цикла."""
     now = now or utcnow()
@@ -228,7 +230,9 @@ async def build(
         )
 
     # ── Показатели ──────────────────────────────────────────────────────────
-    if with_metrics:
+    # Переключатель раздела снимает показатели с экрана целиком, а не прячет
+    # строки: считать их и не показывать — это те же запросы впустую.
+    if with_metrics and feature_service.is_on(features, "analytics"):
         audience = await analytics.audience_for(session, viewer=viewer, grants=grants)
         if audience is not None and not audience.empty:
             board.metrics = await analytics.headline(

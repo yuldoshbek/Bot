@@ -24,13 +24,14 @@ from sqlalchemy import delete, func, select
 
 from app.core.db import session_scope
 from app.core.dates import parse_due
-from app.core.timeutil import utcnow
+from app.core.timeutil import to_local, utcnow
 from app.models import (
     Absence,
     AuditLog,
     CalendarBlock,
     Decision,
     Department,
+    Holiday,
     Meeting,
     MeetingAttendance,
     MeetingParticipant,
@@ -46,12 +47,14 @@ from app.models import (
     TaskStatus,
     TaskTemplate,
     TimeQuota,
+    FeatureFlag,
     User,
     UserRole,
     UserStatus,
     WorkingHours,
 )
 from app.models.enums import (
+    AbsenceKind,
     ExtensionStatus,
     ParticipantRole,
     Priority,
@@ -59,7 +62,8 @@ from app.models.enums import (
     RoleCode,
     TaskEventKind,
 )
-from app.services import analytics, dashboard, digest, templates
+from app.services import analytics, dashboard, digest, features, orgadmin, templates
+from app.services import slots as slot_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
 
@@ -147,6 +151,12 @@ async def cleanup() -> None:
         await session.execute(delete(Decision).where(Decision.organization_id.in_(org_ids)))
         await session.execute(
             delete(TaskTemplate).where(TaskTemplate.organization_id.in_(org_ids))
+        )
+        await session.execute(
+            delete(FeatureFlag).where(FeatureFlag.organization_id.in_(org_ids))
+        )
+        await session.execute(
+            delete(Holiday).where(Holiday.organization_id.in_(org_ids))
         )
         await session.execute(delete(Task).where(Task.organization_id.in_(org_ids)))
         if meeting_ids:
@@ -1173,7 +1183,240 @@ async def stage_five() -> None:
         )
         check(int(alive or 0) >= 2, "а созданные по нему поручения остались", f"{alive}")
 
-    print("\n30. Уборка не трогает боевые данные")
+    print("\n30. Рабочие часы: настройка действует сразу")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        org = await session.get(Organization, chief.organization_id)
+        admin = await person(session, org, "ТЕСТ Настройщик", RoleCode.ADMIN, 970_000_001)
+        admin_grants = await load_grants(session, admin)
+        worker_grants = await load_grants(session, worker)
+
+        # День для проверки берём чистый: на нём нет встреч из прошлых разделов.
+        quiet_day = MONDAY + timedelta(days=56)
+        before = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            now=at(quiet_day, 8), limit=50,
+        )
+        latest_before = max(
+            (to_local(s.start, "Asia/Tashkent").hour for s in before), default=0
+        )
+        check(latest_before >= 18, "до правки день длинный", f"последнее окно в {latest_before}")
+
+        result = await orgadmin.set_hours(
+            session, actor=admin, grants=admin_grants, subject=chief,
+            start=time(9, 0), end=time(14, 0),
+        )
+        check(result.ok, "рабочие часы изменены", result.reason or "")
+
+        after = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            now=at(quiet_day, 8), limit=50,
+        )
+        latest_after = max(
+            (to_local(s.start, "Asia/Tashkent").hour for s in after), default=0
+        )
+        check(
+            latest_after < 14,
+            "и расчёт окон изменился сразу, без перезапуска",
+            f"последнее окно теперь в {latest_after}",
+        )
+
+        # Возвращаем как было, чтобы не мешать остальным разделам.
+        await orgadmin.set_hours(
+            session, actor=admin, grants=admin_grants, subject=chief,
+            start=time(9, 0), end=time(19, 0),
+        )
+
+        print("\n31. Настройки правит только администратор, и всё попадает в журнал")
+        refused = await orgadmin.set_hours(
+            session, actor=worker, grants=worker_grants, subject=chief, start=time(8, 0)
+        )
+        check(not refused.ok, "сотрудник расписание не правит", refused.reason or "прошло")
+
+        logged = await session.scalar(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.actor_id == admin.id, AuditLog.action == "settings.hours"
+            )
+        )
+        check(int(logged or 0) >= 1, "правка записана в журнал", f"{logged}")
+        entry = (
+            await session.execute(
+                select(AuditLog).where(
+                    AuditLog.actor_id == admin.id, AuditLog.action == "settings.hours"
+                ).order_by(AuditLog.id).limit(1)
+            )
+        ).scalar_one()
+        check(
+            entry.before_json is not None and entry.after_json is not None,
+            "и записана с «было/стало», а не одним фактом",
+            f"before={bool(entry.before_json)}, after={bool(entry.after_json)}",
+        )
+        # Через .get, а не по ключу: упавшая проверка уносит с собой все
+        # следующие разделы, и отсутствие поля выглядело бы как «всё прошло».
+        was_end = ((entry.before_json or {}).get("days") or [{}])[0].get("end")
+        now_end = ((entry.after_json or {}).get("days") or [{}])[0].get("end")
+        check(
+            was_end == "19:00" and now_end == "14:00",
+            "в журнале видно, что именно поменялось",
+            f"{was_end} → {now_end}",
+        )
+
+        print("\n32. Обед обязан помещаться в рабочий день")
+        bad = await orgadmin.set_hours(
+            session, actor=admin, grants=admin_grants, subject=chief,
+            lunch_start=time(20, 0), lunch_end=time(21, 0),
+        )
+        check(not bad.ok, "обед за пределами дня не принимается", bad.reason or "прошло")
+        # Отказ не должен оставить половину недели изменённой.
+        rows = await orgadmin.hours_of(session, chief)
+        check(
+            all(row.lunch_start == time(13, 0) for row in rows if row.lunch_start),
+            "и ни один день при этом не изменился",
+            f"{[str(r.lunch_start) for r in rows[:3]]}",
+        )
+
+    print("\n33. Праздник и отпуск закрывают окна")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        admin = (
+            await session.execute(
+                select(User).where(User.full_name == "ТЕСТ Настройщик")
+            )
+        ).scalar_one()
+        admin_grants = await load_grants(session, admin)
+
+        feast = MONDAY + timedelta(days=63)
+        open_before = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            now=at(feast, 8), limit=10,
+        )
+        check(bool(open_before), "до праздника окна есть", f"{len(open_before)}")
+
+        holiday = await orgadmin.set_holiday(
+            session, actor=admin, grants=admin_grants, day=feast,
+            title="ТЕСТ праздник", today=feast,
+        )
+        check(holiday.ok, "праздник заведён", holiday.reason or "")
+        closed = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            now=at(feast, 8), limit=10,
+        )
+        check(not closed, "и окна в этот день исчезли", f"{len(closed)}")
+
+        # Повторное заведение той же даты правит запись, а не плодит вторую:
+        # две записи на один день сделали бы расчёт зависящим от порядка выборки.
+        again = await orgadmin.set_holiday(
+            session, actor=admin, grants=admin_grants, day=feast,
+            title="ТЕСТ праздник переименованный", today=feast,
+        )
+        check(again.ok, "тот же день заводится повторно", again.reason or "")
+        count = await session.scalar(
+            select(func.count(Holiday.id)).where(
+                Holiday.organization_id == chief.organization_id, Holiday.day == feast
+            )
+        )
+        check(int(count or 0) == 1, "и запись осталась одна", f"{count}")
+
+        vacation_from = MONDAY + timedelta(days=70)
+        vacation_to = vacation_from + timedelta(days=4)
+        leave = await orgadmin.set_absence(
+            session, actor=admin, grants=admin_grants, subject=worker,
+            kind=AbsenceKind.VACATION, start_date=vacation_from, end_date=vacation_to,
+        )
+        check(leave.ok, "отпуск заведён", leave.reason or "")
+        with_worker = await slot_service.free_slots(
+            session, owner=chief, duration_minutes=30, days_ahead=0,
+            participants=[worker], now=at(vacation_from, 8), limit=10,
+        )
+        check(not with_worker, "в отпуск общих окон с ним нет", f"{len(with_worker)}")
+
+        overlap = await orgadmin.set_absence(
+            session, actor=admin, grants=admin_grants, subject=worker,
+            kind=AbsenceKind.TRIP, start_date=vacation_to, end_date=vacation_to + timedelta(days=2),
+        )
+        check(not overlap.ok, "пересекающееся отсутствие не заводится", overlap.reason or "прошло")
+
+    print("\n34. Переключатель закрывает раздел, а не только кнопку")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief = who["руководитель"]
+        admin = (
+            await session.execute(
+                select(User).where(User.full_name == "ТЕСТ Настройщик")
+            )
+        ).scalar_one()
+        admin_grants = await load_grants(session, admin)
+        org_id = chief.organization_id
+
+        state = await features.load(session, org_id)
+        check(all(state.values()), "по умолчанию включено всё", str(state))
+        check(
+            len(state) == len(features.FEATURES),
+            "и переключателей столько же, сколько разделов",
+            f"{len(state)} против {len(features.FEATURES)}",
+        )
+
+        problem = await features.switch(
+            session, organization_id=org_id, code="analytics", enabled=False, actor=admin
+        )
+        check(problem is None, "раздел выключен", problem or "")
+        state = await features.load(session, org_id)
+        check(not state["analytics"], "состояние сохранилось")
+
+        # Показатели обязаны исчезнуть с экрана, а не просто спрятаться.
+        board = await dashboard.build(
+            session, viewer=chief, grants=await load_grants(session, chief),
+            now=NOW, features=state,
+        )
+        check(not board.metrics, "показатели с экрана исчезли", f"{len(board.metrics)}")
+        # Кнопка меню исчезает вместе с разделом встреч.
+        from app.bot.keyboards.common import BTN_MY_DAY, main_menu
+
+        await features.switch(
+            session, organization_id=org_id, code="meetings", enabled=False, actor=admin
+        )
+        state = await features.load(session, org_id)
+        buttons = {
+            button.text
+            for row in main_menu({RoleCode.EXECUTIVE}, state).keyboard
+            for button in row
+        }
+        check(BTN_MY_DAY not in buttons, "кнопка «Мой день» убрана из меню", str(sorted(buttons)[:3]))
+        full = {
+            button.text
+            for row in main_menu({RoleCode.EXECUTIVE}).keyboard
+            for button in row
+        }
+        check(BTN_MY_DAY in full, "а при включённом разделе она на месте")
+
+        # Выключение записано в журнал: настройка меняет поведение системы.
+        logged = await session.scalar(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.actor_id == admin.id, AuditLog.action == "feature.switch"
+            )
+        )
+        check(int(logged or 0) == 2, "оба переключения в журнале", f"{logged}")
+
+        # Сводка выключенного раздела не собирается вовсе.
+        await features.switch(
+            session, organization_id=org_id, code="digest", enabled=False, actor=admin
+        )
+        text, _ = await digest.build_for(
+            session, viewer=chief, now=at(MONDAY, 7, 30).astimezone(timezone.utc)
+        )
+        check(text is None, "выключенная сводка не собирается", (text or "")[:40])
+
+        # Возвращаем всё как было: остальные разделы проверки на это опираются.
+        for code in ("analytics", "meetings", "digest"):
+            await features.switch(
+                session, organization_id=org_id, code=code, enabled=True, actor=admin
+            )
+        restored = await features.load(session, org_id)
+        check(all(restored.values()), "и всё включается обратно", str(restored))
+
+    print("\n35. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(

@@ -47,6 +47,7 @@ from app.models import (
     UserStatus,
 )
 from app.services import dashboard
+from app.services import features as feature_service
 from app.services.notifications import enqueue
 from app.services.rbac import load_grants
 
@@ -194,7 +195,15 @@ async def build_for(
     Возвращает и доску: вызывающему бывает нужно знать, почему письма нет.
     """
     grants = await load_grants(session, viewer)
-    board = await dashboard.build(session, viewer=viewer, grants=grants, now=now)
+    state = await feature_service.load(session, viewer.organization_id)
+    if not feature_service.is_on(state, "digest"):
+        # Выключенная сводка не рассылается вовсе. Проверка здесь, а не только
+        # в цикле: письмо собирается в одном месте, и закрывать раздел нужно там,
+        # где оно рождается.
+        return None, dashboard.Board(day=now, timezone=viewer.timezone)
+    board = await dashboard.build(
+        session, viewer=viewer, grants=grants, now=now, features=state
+    )
 
     is_assistant = await has_role(session, viewer, RoleCode.ASSISTANT)
     chiefs: list[ChiefDay] = []

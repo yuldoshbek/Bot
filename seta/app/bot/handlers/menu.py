@@ -25,7 +25,10 @@ COMING_SOON: dict[str, tuple[str, int]] = {}
 
 
 @router.message(F.text == BTN_PROFILE)
-async def profile(message: Message, session: AsyncSession, user: User, roles: set[RoleCode]) -> None:
+async def profile(
+    message: Message, session: AsyncSession, user: User,
+    roles: set[RoleCode], features: dict[str, bool],
+) -> None:
     department = "не указано"
     if user.department_id:
         dept = await session.get(Department, user.department_id)
@@ -62,7 +65,7 @@ async def profile(message: Message, session: AsyncSession, user: User, roles: se
         if view.until_at:
             lines.append(f"   действует до {fmt_time(view.until_at, user.timezone)}")
 
-    await message.answer("\n".join(lines), reply_markup=main_menu(roles))
+    await message.answer("\n".join(lines), reply_markup=main_menu(roles, features))
 
 
 @router.message(F.text == BTN_HELP)

@@ -45,7 +45,7 @@ from app.models.meeting import (
     TimeQuota,
 )
 from app.models.notification import Notification
-from app.models.org import Department, Organization
+from app.models.org import Department, FeatureFlag, Organization
 from app.models.rbac import Delegation, Permission, Role, RolePermission, UserRole
 from app.models.schedule import (
     Absence,
@@ -62,6 +62,7 @@ __all__ = [
     "Base",
     "Organization",
     "Department",
+    "FeatureFlag",
     "User",
     "Invite",
     "Role",

@@ -64,10 +64,11 @@ async def cmd_start(
     organization: Organization,
     user: User | None,
     roles: set[RoleCode],
+    features: dict[str, bool],
 ) -> None:
     if user is not None and user.status == UserStatus.ACTIVE:
         await state.clear()
-        await message.answer(await greeting(session, user, roles), reply_markup=main_menu(roles))
+        await message.answer(await greeting(session, user, roles), reply_markup=main_menu(roles, features))
         return
 
     if user is not None and user.status == UserStatus.PENDING:
@@ -195,6 +196,7 @@ async def reg_contact(
     state: FSMContext,
     session: AsyncSession,
     organization: Organization,
+    features: dict[str, bool],
     bot: Bot,
 ) -> None:
     if message.contact.user_id != message.from_user.id:
@@ -243,7 +245,7 @@ async def reg_contact(
                 "2. «Ссылки-приглашения» — отправьте ссылку в чат отдела\n"
                 "3. Руководителю дайте зарегистрироваться и подтвердите его заявку"
             )
-        await message.answer(text, reply_markup=main_menu(roles))
+        await message.answer(text, reply_markup=main_menu(roles, features))
         return
 
     await message.answer(

@@ -27,6 +27,7 @@ from app.models.task import Task, TaskComment, TaskEvent, TaskTemplate
 from app.models.user import User
 from app.services import tasks as service
 from app.services import templates
+from app.services import features as feature_service
 from app.services.rbac import Grant, can_access_object, has_permission, visible_department_ids
 from app.services.tasks import PRIORITY_LABELS, STATUS_LABELS, TaskError
 
@@ -65,6 +66,7 @@ class TaskInput(StatesGroup):
 async def new_task(
     message: Message, state: FSMContext, session: AsyncSession,
     organization: Organization, user: User, grants: dict[str, Grant],
+    features: dict[str, bool],
 ) -> None:
     if not has_permission(grants, "task.create"):
         await message.answer("Создавать поручения может руководитель, ассистент или начальник отдела.")
@@ -79,7 +81,11 @@ async def new_task(
         return
 
     await state.clear()
-    ready = await templates.catalogue(session, organization_id=user.organization_id)
+    ready = (
+        await templates.catalogue(session, organization_id=user.organization_id)
+        if feature_service.is_on(features, "templates")
+        else []
+    )
     if ready:
         await message.answer(
             "<b>Типовые поручения</b>\n\nОдно нажатие — и поручение создано.",
@@ -753,8 +759,12 @@ async def _executive_of(session: AsyncSession, organization_id: int) -> User | N
 
 @router.callback_query(F.data.startswith("tt:save:"))
 async def template_save(
-    call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]
+    call: CallbackQuery, session: AsyncSession, user: User,
+    grants: dict[str, Grant], features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
     task = await session.get(Task, callback_int(call.data) or 0)
     if task is None:
         await call.answer(STALE_BUTTON, show_alert=True)
@@ -783,8 +793,11 @@ async def template_save(
 
 @router.callback_query(F.data == "tt:list")
 async def template_list(
-    call: CallbackQuery, session: AsyncSession, user: User
+    call: CallbackQuery, session: AsyncSession, user: User, features: dict[str, bool]
 ) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
     items = await templates.catalogue(session, organization_id=user.organization_id)
     if not items:
         await call.answer("Шаблонов пока нет.", show_alert=True)
@@ -808,8 +821,11 @@ async def template_list(
 @router.callback_query(F.data.startswith("tt:use:"))
 async def template_use(
     call: CallbackQuery, state: FSMContext, session: AsyncSession,
-    user: User, grants: dict[str, Grant],
+    user: User, grants: dict[str, Grant], features: dict[str, bool],
 ) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
     template = await session.get(TaskTemplate, callback_int(call.data) or 0)
     if template is None or template.organization_id != user.organization_id:
         await call.answer(STALE_BUTTON, show_alert=True)
@@ -873,8 +889,11 @@ async def template_assignee(
 
 @router.callback_query(F.data.startswith("tt:drop:"))
 async def template_drop(
-    call: CallbackQuery, session: AsyncSession, user: User
+    call: CallbackQuery, session: AsyncSession, user: User, features: dict[str, bool]
 ) -> None:
+    if not feature_service.is_on(features, "templates"):
+        await call.answer(feature_service.OFF_MESSAGE, show_alert=True)
+        return
     template = await session.get(TaskTemplate, callback_int(call.data) or 0)
     if template is None or template.organization_id != user.organization_id:
         await call.answer(STALE_BUTTON, show_alert=True)

@@ -1,7 +1,7 @@
 """Middleware авторизации.
 
 На каждый апдейт открывает транзакцию, находит сотрудника по Telegram ID
-и кладёт в контекст обработчика: session, user, grants, roles, organization.
+и кладёт в контекст обработчика: session, user, grants, roles, features, organization.
 
 Middleware — первый рубеж, а не последний. Неподтверждённый человек проходит
 дальше намеренно: ему нужно закончить регистрацию, а на кнопки меню он получает
@@ -19,6 +19,7 @@ from app.core.timeutil import utcnow
 from app.models.enums import UserStatus
 from app.models.org import Organization
 from app.services.bootstrap import ensure_organization
+from app.services.features import load as load_features
 from app.services.rbac import load_grants, user_role_codes
 from app.services.registration import get_user_by_telegram_id
 
@@ -58,6 +59,10 @@ class AuthMiddleware(BaseMiddleware):
             data["user"] = user
             data["grants"] = await load_grants(session, user) if user else {}
             data["roles"] = await user_role_codes(session, user) if user else set()
+            # Переключатели разделов кладутся рядом с правами и одним запросом:
+            # обработчик обязан проверить их сам, как и право. Спрятать кнопку
+            # мало — старую кнопку жмут, а callback подставляют.
+            data["features"] = await load_features(session, organization.id)
 
             if user is not None:
                 user.last_seen_at = utcnow()

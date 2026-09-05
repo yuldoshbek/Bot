@@ -25,8 +25,18 @@ BTN_PROFILE = "👤 Профиль"
 BTN_HELP = "❓ Помощь"
 
 
-def main_menu(roles: set[RoleCode]) -> ReplyKeyboardMarkup:
-    """Меню собирается по ролям: человек видит только то, что ему разрешено."""
+# Какие кнопки исчезают вместе с выключенным разделом. Кнопка — только половина
+# выключения: обработчик за ней обязан отказать сам, иначе старая кнопка
+# в истории чата продолжит открывать закрытый раздел.
+FEATURE_BUTTONS: dict[str, set[str]] = {
+    "meetings": {BTN_MY_DAY, BTN_MY_MEETINGS, BTN_REQUEST_MEETING, BTN_QUICK_MEETING},
+}
+
+
+def main_menu(
+    roles: set[RoleCode], features: dict[str, bool] | None = None
+) -> ReplyKeyboardMarkup:
+    """Меню собирается по ролям и по включённым разделам."""
     rows: list[list[KeyboardButton]] = []
 
     if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
@@ -43,6 +53,19 @@ def main_menu(roles: set[RoleCode]) -> ReplyKeyboardMarkup:
         rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
         rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_WHO_IS_OPEN)])
         rows.append([KeyboardButton(text=BTN_DECISIONS), KeyboardButton(text=BTN_SEARCH)])
+
+    if features:
+        hidden = {
+            text
+            for code, buttons in FEATURE_BUTTONS.items()
+            if not features.get(code, True)
+            for text in buttons
+        }
+        if hidden:
+            rows = [
+                [button for button in row if button.text not in hidden] for row in rows
+            ]
+            rows = [row for row in rows if row]
 
     if RoleCode.ADMIN in roles:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
@@ -136,6 +159,11 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="👥 Сотрудники", callback_data="adm:users")],
             [InlineKeyboardButton(text="🏢 Отделы", callback_data="adm:depts")],
             [InlineKeyboardButton(text="🔗 Ссылки-приглашения", callback_data="adm:invites")],
+            [InlineKeyboardButton(text="🕐 Рабочие часы", callback_data="adm:hours")],
+            [InlineKeyboardButton(text="⏳ Лимиты времени", callback_data="adm:quotas")],
+            [InlineKeyboardButton(text="📆 Праздники", callback_data="adm:holidays")],
+            [InlineKeyboardButton(text="🏖 Отпуска", callback_data="adm:absences")],
+            [InlineKeyboardButton(text="🎛 Разделы системы", callback_data="adm:features")],
             [InlineKeyboardButton(text="📜 Журнал действий", callback_data="adm:audit")],
         ]
     )
