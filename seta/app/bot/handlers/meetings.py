@@ -134,13 +134,15 @@ async def _my_meetings(
 
 
 def _card_kb(
-    meeting: Meeting, user: User, grants: dict[str, Grant], now: datetime
+    meeting: Meeting, grants: dict[str, Grant], now: datetime, *, is_participant: bool
 ) -> InlineKeyboardMarkup:
     """Кнопки карточки — только те, что этому человеку сейчас доступны."""
     rows: list[list[InlineKeyboardButton]] = []
     live = meeting.status != MeetingStatus.CANCELLED
 
-    if live and now < meeting.end_at:
+    # Отмечается участник. Ассистенту, который видит встречу по области права,
+    # эта кнопка не нужна и не работает: за других явку правят отдельно.
+    if is_participant and live and now < meeting.end_at:
         if now >= meeting.start_at - timedelta(minutes=attendance.CHECKIN_OPENS_MINUTES):
             rows.append([InlineKeyboardButton(
                 text="🙋 Я на месте", callback_data=f"mt:here:{meeting.id}"
@@ -193,9 +195,10 @@ def _card_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _card_text(session: AsyncSession, meeting: Meeting, viewer: User) -> str:
+async def _card_text(
+    session: AsyncSession, meeting: Meeting, viewer: User, people: list[User]
+) -> str:
     owner = await session.get(User, meeting.owner_id)
-    people = await service.participants_of(session, meeting)
     lines = [
         f"<b>{esc(meeting.title)}</b>",
         "",
@@ -296,14 +299,17 @@ async def my_meetings(message: Message, session: AsyncSession, user: User) -> No
 async def meeting_card(
     call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
-    meeting_id = callback_int(call.data)
-    meeting = await session.get(Meeting, meeting_id) if meeting_id else None
-    if meeting is None or meeting.organization_id != user.organization_id:
+    meeting = await _meeting_or_none(session, call, user)
+    if meeting is None:
         await call.answer(STALE_BUTTON, show_alert=True)
         return
+    people = await service.participants_of(session, meeting)
     await call.message.answer(
-        await _card_text(session, meeting, user),
-        reply_markup=_card_kb(meeting, user, grants, utcnow()),
+        await _card_text(session, meeting, user, people),
+        reply_markup=_card_kb(
+            meeting, grants, utcnow(),
+            is_participant=any(p.id == user.id for p in people),
+        ),
     )
     await call.answer()
 
@@ -822,9 +828,17 @@ class TaskFromMeeting(StatesGroup):
 
 
 async def _meeting_or_none(session: AsyncSession, call: CallbackQuery, user: User):
+    """Встреча из нажатой кнопки — если она вообще открыта этому человеку.
+
+    Совпадение организации само по себе доступа не даёт: у рядового сотрудника
+    область права `meeting.read` — «только свои», и номер чужой встречи в
+    callback не должен открывать ни тему, ни состав участников.
+    """
     meeting_id = callback_int(call.data)
     meeting = await session.get(Meeting, meeting_id) if meeting_id else None
-    if meeting is None or meeting.organization_id != user.organization_id:
+    if meeting is None:
+        return None
+    if not await service.may_read(session, meeting=meeting, viewer=user):
         return None
     return meeting
 

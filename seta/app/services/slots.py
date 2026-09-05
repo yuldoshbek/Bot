@@ -216,9 +216,19 @@ async def _load(
             or_(Meeting.owner_id.in_(people_ids), MeetingParticipant.user_id.in_(people_ids)),
         )
     )
+    # Соединение с участниками даёт по строке на участника: встреча на троих
+    # приходит трижды. Для занятости это безвредно — интервалы всё равно
+    # схлопываются, — но счётчик встреч подряд принял бы три копии одной
+    # встречи за три разные и убрал бы из выдачи свободные окна. Поэтому пара
+    # «человек + встреча» запоминается ровно один раз.
+    wanted = set(people_ids)
+    seen: set[tuple[int, int]] = set()
     meetings: dict[int, list[tuple[int, datetime, datetime]]] = {}
     for meeting, participant_id in meeting_rows.all():
-        for person_id in {meeting.owner_id, participant_id} & set(people_ids):
+        for person_id in {meeting.owner_id, participant_id} & wanted:
+            if (person_id, meeting.id) in seen:
+                continue
+            seen.add((person_id, meeting.id))
             meetings.setdefault(person_id, []).append(
                 (meeting.id, meeting.start_at, meeting.end_at)
             )
