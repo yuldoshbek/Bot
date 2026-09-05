@@ -34,7 +34,7 @@ from app.models.org import Organization
 from app.models.user import User
 from app.models.rbac import Role, UserRole
 from app.core.dates import humanize_due, parse_due
-from app.services import attendance, meetings as service, quotas
+from app.services import attendance, dashboard, meetings as service, quotas
 from app.services import decisions as registry
 from app.services import documents as document_service
 from app.services import tasks as task_service
@@ -227,52 +227,97 @@ async def _card_text(
 
 
 # ── Мой день ────────────────────────────────────────────────────────────────
+def _day_text(board: dashboard.Board, tz: str) -> str:
+    """Экран одним сообщением. Пустой блок не рисуется вовсе.
+
+    Порядок блоков повторяет порядок вопросов из критерия готовности: что
+    сейчас, что дальше, что требует решения, что просрочено. Показатели идут
+    последними — они объясняют, а не требуют действия.
+    """
+    local = to_local(board.day, tz)
+    lines = [f"<b>Мой день · {local.strftime('%d.%m')}</b>", ""]
+
+    if board.running:
+        lines.append("<b>Сейчас</b>")
+        for m in board.running:
+            lines.append(f"🔴 {esc(m.title)} — до {to_local(m.end_at, tz):%H:%M}")
+        lines.append("")
+
+    if board.ahead:
+        lines.append("<b>Дальше</b>")
+        for m in board.ahead:
+            lines.append(f"🕐 {to_local(m.start_at, tz):%H:%M} {esc(m.title)}")
+    elif not board.running:
+        lines.append("Встреч на сегодня нет.")
+
+    if board.free_slot:
+        lines.append(f"🟢 Свободно с {to_local(board.free_slot.start, tz):%H:%M}")
+
+    if board.needs_decision:
+        lines += ["", "<b>Требует решения</b>"]
+        if board.requests_waiting:
+            tail = (
+                f", сверх лимита {board.requests_over_quota}"
+                if board.requests_over_quota
+                else ""
+            )
+            lines.append(f"📥 Заявок на встречу: {board.requests_waiting}{tail}")
+        if board.to_review:
+            lines.append(f"🔍 Ждут вашей проверки: {board.to_review}")
+        if board.stale_decisions:
+            lines.append(f"📌 Решений с прошедшим сроком: {board.stale_decisions}")
+
+    if board.overdue_total:
+        # Сводкой, а не поштучно: решение Р-10. Поимённо — только личный контроль.
+        lines += ["", f"<b>Просрочено: {board.overdue_total}</b>"]
+        for name, count in board.overdue_by_department:
+            lines.append(f"• {esc(name)}: {count}")
+        if board.overdue_other:
+            lines.append(f"• в остальных отделах: {board.overdue_other}")
+        if board.personal_overdue:
+            lines.append("")
+            lines.append("<b>На личном контроле</b>")
+            for task in board.personal_overdue:
+                lines.append(
+                    f"‼️ {esc(cut(task.title, 60))} — срок {fmt_dt(task.due_at, tz)}"
+                )
+
+    if board.metrics:
+        lines += ["", "<b>Показатели за 30 дней</b>"]
+        lines += [f"· {esc(metric.render())}" for metric in board.metrics]
+
+    if board.quiet:
+        lines += ["", "Ничего не требует внимания."]
+
+    return "\n".join(lines)
+
+
+def _day_kb(board: dashboard.Board) -> InlineKeyboardMarkup | None:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="📅 " + cut(m.title, 30), callback_data=f"mt:card:{m.id}")]
+        for m in (board.running + board.ahead)[:4]
+    ]
+    if board.requests_waiting:
+        rows.append([InlineKeyboardButton(
+            text=f"📥 Заявки на встречу ({board.requests_waiting})", callback_data="rq:list"
+        )])
+    if board.to_review:
+        rows.append([InlineKeyboardButton(
+            text=f"🔍 На проверке ({board.to_review})", callback_data="tl:review"
+        )])
+    if board.overdue_total:
+        rows.append([InlineKeyboardButton(
+            text=f"🔴 Просроченные ({board.overdue_total})", callback_data="tl:overdue"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
 @router.message(F.text == BTN_MY_DAY)
 async def my_day(
     message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
-    now = utcnow()
-    local = to_local(now, user.timezone)
-    day_start = (local.replace(hour=0, minute=0, second=0, microsecond=0)).astimezone(now.tzinfo)
-    day_end = day_start + timedelta(days=1)
-
-    today = await _my_meetings(session, user, since=day_start, until=day_end)
-    current = [m for m in today if m.start_at <= now < m.end_at]
-    ahead = [m for m in today if m.start_at > now]
-
-    lines = [f"<b>Мой день · {local.strftime('%d.%m')}</b>", ""]
-    if current:
-        lines.append("<b>Сейчас</b>")
-        for m in current:
-            lines.append(f"🔴 {esc(m.title)} — до {to_local(m.end_at, user.timezone):%H:%M}")
-        lines.append("")
-    if ahead:
-        lines.append("<b>Дальше</b>")
-        for m in ahead[:5]:
-            lines.append(f"🕐 {to_local(m.start_at, user.timezone):%H:%M} {esc(m.title)}")
-    elif not current:
-        lines.append("Встреч на сегодня нет.")
-
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="📅 " + esc(cut(m.title, 30)), callback_data=f"mt:card:{m.id}")]
-        for m in (current + ahead)[:4]
-    ]
-
-    if has_permission(grants, "meeting.approve"):
-        waiting = await service.pending_for(session, user)
-        over = await quotas.over_quota_requests(session, owner=user)
-        if waiting:
-            lines += ["", f"<b>Требуют решения: {len(waiting)}</b>"]
-            if over:
-                lines.append(f"из них сверх лимита: {len(over)}")
-            rows.append([InlineKeyboardButton(
-                text=f"📥 Заявки на встречу ({len(waiting)})", callback_data="rq:list"
-            )])
-
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
-    )
+    board = await dashboard.build(session, viewer=user, grants=grants)
+    await message.answer(_day_text(board, user.timezone), reply_markup=_day_kb(board))
 
 
 @router.message(F.text == BTN_MY_MEETINGS)

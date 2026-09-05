@@ -56,7 +56,7 @@ from app.models.enums import (
     RoleCode,
     TaskEventKind,
 )
-from app.services import analytics
+from app.services import analytics, dashboard
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
 
@@ -658,7 +658,130 @@ async def stage_five() -> None:
             f"подозрительных: {sum(1 for q in selects if 'COUNT(' not in q.upper() and 'SUM(' not in q.upper() and 'AVG(' not in q.upper() and 'LIMIT' not in q.upper() and 'users' not in q.lower())}",
         )
 
-    print("\n17. Уборка не трогает боевые данные")
+    print("\n17. Экран руководителя: четыре вопроса в одном сообщении")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, head, worker = who["руководитель"], who["начальник"], who["сотрудник"]
+        grants = await load_grants(session, chief)
+
+        board = await dashboard.build(session, viewer=chief, grants=grants, now=NOW)
+        check(len(board.metrics) == 5, "на экране пять показателей", str(len(board.metrics)))
+        check(board.overdue_total > 0, "просрочки посчитаны", str(board.overdue_total))
+        # Сводка по отделам обязана сходиться с общим числом: иначе экрану
+        # перестанут верить на второй же неделе.
+        check(
+            sum(count for _, count in board.overdue_by_department)
+            + board.overdue_other == board.overdue_total,
+            "сводка по отделам сходится с общим числом",
+            f"{board.overdue_by_department} + {board.overdue_other}"
+            f" против {board.overdue_total}",
+        )
+        check(
+            board.to_review >= 0 and board.requests_waiting >= 0,
+            "блоки «требует решения» посчитаны",
+        )
+
+        print("\n18. Личный контроль — исключение из правила сводки")
+        marked = Task(
+            organization_id=chief.organization_id, title="ТЕСТ на личном контроле",
+            creator_id=chief.id, assignee_id=worker.id, status=TaskStatus.IN_PROGRESS,
+            personal_control=True, due_at=at(MONDAY + timedelta(days=1), 18),
+            created_at=at(MONDAY, 9),
+        )
+        session.add(marked)
+        await session.flush()
+        with_personal = await dashboard.build(
+            session, viewer=chief, grants=grants, now=NOW
+        )
+        check(
+            any(t.id == marked.id for t in with_personal.personal_overdue),
+            "поручение на личном контроле показано поимённо",
+            f"{[t.title for t in with_personal.personal_overdue]}",
+        )
+        ordinary = [
+            t for t in with_personal.personal_overdue if not t.personal_control
+        ]
+        check(not ordinary, "а обычные просрочки поимённо не показываются")
+
+        print("\n19. Поручение без отдела не теряется в сводке")
+        homeless = Task(
+            organization_id=chief.organization_id, title="ТЕСТ без отдела",
+            creator_id=chief.id, assignee_id=chief.id, status=TaskStatus.IN_PROGRESS,
+            department_id=None, due_at=at(MONDAY + timedelta(days=1), 18),
+            created_at=at(MONDAY, 9),
+        )
+        session.add(homeless)
+        await session.flush()
+        wide = await dashboard.build(session, viewer=chief, grants=grants, now=NOW)
+        check(
+            sum(count for _, count in wide.overdue_by_department)
+            + wide.overdue_other == wide.overdue_total,
+            "сумма сходится и с поручением без отдела",
+            f"{wide.overdue_by_department} + {wide.overdue_other}"
+            f" против {wide.overdue_total}",
+        )
+        check(
+            any(name == "вне отделов" for name, _ in wide.overdue_by_department),
+            "и оно попало в строку «вне отделов»",
+            f"{wide.overdue_by_department}",
+        )
+
+        print("\n20. Экран сотрудника и счёт запросов")
+        worker_board = await dashboard.build(
+            session, viewer=worker, grants=await load_grants(session, worker), now=NOW
+        )
+        check(not worker_board.metrics, "сотруднику показатели не считаются")
+        check(
+            worker_board.requests_waiting == 0 and worker_board.stale_decisions == 0,
+            "и блоки руководителя ему не собираются",
+        )
+
+        from sqlalchemy import event
+        from app.core.db import engine
+
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record)
+        try:
+            await dashboard.build(session, viewer=chief, grants=grants, now=NOW)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+        # Экран открывают несколько раз в день; он обязан оставаться дешёвым
+        # и не расти вместе с числом поручений.
+        check(
+            len(statements) <= 40,
+            "экран собирается ограниченным числом запросов",
+            f"запросов: {len(statements)}",
+        )
+
+    print("\n21. Пустая организация: экран не врёт нулями")
+    async with session_scope() as session:
+        empty_org = Organization(name=f"{TEST_ORG_PREFIX}Пустая", timezone="Asia/Tashkent")
+        session.add(empty_org)
+        await session.flush()
+        lonely = await person(
+            session, empty_org, "ТЕСТ Одинокий", RoleCode.EXECUTIVE, 961_000_001
+        )
+        board = await dashboard.build(
+            session, viewer=lonely, grants=await load_grants(session, lonely), now=NOW
+        )
+        check(board.quiet, "экран признаёт, что ничего не происходит")
+        check(board.overdue_total == 0 and not board.overdue_by_department,
+              "сводки просрочек нет вовсе, а не «0»")
+        text = " ".join(
+            f"{m.title}: {m.value}" for m in board.metrics
+        )
+        check(bool(board.metrics), "показатели при этом посчитаны", text[:80])
+        check(
+            sum(1 for m in board.metrics if m.no_data) >= 4,
+            "и почти все честно молчат",
+            f"молчат {sum(1 for m in board.metrics if m.no_data)} из {len(board.metrics)}",
+        )
+
+    print("\n22. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(
