@@ -189,7 +189,7 @@ async def _remind(
         priority=NotificationPriority.NORMAL,
         body=(
             f"⏰ <b>Срок {when_text}</b>\n\n{esc(task.title)}\n"
-            f"📅 {humanize_due(task.due_at, assignee.timezone)}"
+            f"📅 {humanize_due(task.due_at, assignee.timezone, assignee.locale)}"
         ),
         payload={"task_id": task.id},
         timezone_name=assignee.timezone,
@@ -209,7 +209,7 @@ async def _notify_overdue(
         priority=_priority_of(task),
         body=(
             f"🔴 <b>Срок истёк</b>\n\n{esc(task.title)}\n"
-            f"⏰ Был: {humanize_due(task.due_at, assignee.timezone)}\n\n"
+            f"⏰ Был: {humanize_due(task.due_at, assignee.timezone, assignee.locale)}\n\n"
             "Отчитайтесь о выполнении или попросите перенести срок."
         ),
         payload={"task_id": task.id},
@@ -246,7 +246,7 @@ async def _escalate(
         body=(
             f"{header}\n\n{esc(task.title)}\n"
             f"👤 Исполнитель: {esc(assignee.full_name) if assignee else '—'}\n"
-            f"⏰ Срок был: {humanize_due(task.due_at, recipient.timezone)}"
+            f"⏰ Срок был: {humanize_due(task.due_at, recipient.timezone, recipient.locale)}"
         ),
         payload={"task_id": task.id},
         timezone_name=recipient.timezone,

@@ -1056,6 +1056,46 @@ async def stage_five() -> None:
             f"{first.item.due_at} против {by_hand}",
         )
 
+    print("\n26б. Одновременные нажатия, а не подряд")
+    # Десять нажатий подряд проверены выше, но подряд — не то же, что разом.
+    # Бот разбирает обновления параллельно: два быстрых касания приходят двумя
+    # транзакциями, и ни одна не видит незакоммиченную запись другой. Проверка
+    # «нет ли уже такого» пропускает обе, и появляются два поручения.
+    #
+    # Поэтому здесь настоящие параллельные транзакции, а не цикл: последовательный
+    # вызов эту ошибку не воспроизводит вовсе и молча подтвердил бы защиту,
+    # которой нет.
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        grants = await load_grants(session, chief)
+        together = await templates.create(
+            session, actor=chief, grants=grants,
+            title="ТЕСТ одновременное нажатие", days=1, assignee=worker,
+        )
+        check(together.ok, "заведён шаблон для одновременных нажатий",
+              together.reason or "")
+        together_id = together.item.id
+        chief_id = chief.id
+
+    async def press() -> None:
+        async with session_scope() as own:
+            actor = await own.get(User, chief_id)
+            template = await own.get(TaskTemplate, together_id)
+            await templates.apply(
+                own, template=template, actor=actor,
+                grants=await load_grants(own, actor),
+            )
+
+    await asyncio.gather(*(press() for _ in range(10)), return_exceptions=True)
+
+    async with session_scope() as session:
+        together_born = await session.scalar(
+            select(func.count(Task.id)).where(Task.title == "ТЕСТ одновременное нажатие")
+        )
+    check(int(together_born or 0) == 1,
+          "десять одновременных нажатий дали одно поручение", f"их {together_born}")
+
     print("\n27. Поручение из шаблона неотличимо от созданного руками")
     async with session_scope() as session:
         who = await cast(session)
@@ -1372,7 +1412,10 @@ async def stage_five() -> None:
         )
         check(not board.metrics, "показатели с экрана исчезли", f"{len(board.metrics)}")
         # Кнопка меню исчезает вместе с разделом встреч.
-        from app.bot.keyboards.common import BTN_MY_DAY, main_menu
+        from app.bot.keyboards.common import MENU_MY_DAY, main_menu
+        from app.core.i18n import t
+
+        my_day = t(MENU_MY_DAY, "ru")
 
         await features.switch(
             session, organization_id=org_id, code="meetings", enabled=False, actor=admin
@@ -1380,16 +1423,16 @@ async def stage_five() -> None:
         state = await features.load(session, org_id)
         buttons = {
             button.text
-            for row in main_menu({RoleCode.EXECUTIVE}, state).keyboard
+            for row in main_menu({RoleCode.EXECUTIVE}, state, "ru").keyboard
             for button in row
         }
-        check(BTN_MY_DAY not in buttons, "кнопка «Мой день» убрана из меню", str(sorted(buttons)[:3]))
+        check(my_day not in buttons, "кнопка «Мой день» убрана из меню", str(sorted(buttons)[:3]))
         full = {
             button.text
-            for row in main_menu({RoleCode.EXECUTIVE}).keyboard
+            for row in main_menu({RoleCode.EXECUTIVE}, None, "ru").keyboard
             for button in row
         }
-        check(BTN_MY_DAY in full, "а при включённом разделе она на месте")
+        check(my_day in full, "а при включённом разделе она на месте")
 
         # Выключение записано в журнал: настройка меняет поведение системы.
         logged = await session.scalar(

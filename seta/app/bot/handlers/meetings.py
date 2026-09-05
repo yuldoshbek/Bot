@@ -19,10 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import (
-    BTN_MY_DAY,
-    BTN_MY_MEETINGS,
-    BTN_QUICK_MEETING,
-    BTN_REQUEST_MEETING,
+    MENU_MY_DAY,
+    MENU_MY_MEETINGS,
+    MENU_QUICK_MEETING,
+    MENU_REQUEST_MEETING,
+    MenuButton,
 )
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.text import cut, esc
@@ -248,7 +249,7 @@ def _day_kb(board: dashboard.Board) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-@router.message(F.text == BTN_MY_DAY)
+@router.message(MenuButton(MENU_MY_DAY))
 async def my_day(
     message: Message, session: AsyncSession, user: User,
     grants: dict[str, Grant], features: dict[str, bool],
@@ -266,7 +267,7 @@ async def my_day(
     await message.answer(dashboard.render(board), reply_markup=_day_kb(board))
 
 
-@router.message(F.text == BTN_MY_MEETINGS)
+@router.message(MenuButton(MENU_MY_MEETINGS))
 async def my_meetings(
     message: Message, session: AsyncSession, user: User, features: dict[str, bool]
 ) -> None:
@@ -313,7 +314,7 @@ async def meeting_card(
 
 
 # ── Запрос встречи ──────────────────────────────────────────────────────────
-@router.message(F.text == BTN_REQUEST_MEETING)
+@router.message(MenuButton(MENU_REQUEST_MEETING))
 async def request_start(
     message: Message, state: FSMContext, session: AsyncSession,
     organization: Organization, user: User, grants: dict[str, Grant],
@@ -681,7 +682,7 @@ async def kill_finish(
 
 
 # ── Быстрое совещание ───────────────────────────────────────────────────────
-@router.message(F.text == BTN_QUICK_MEETING)
+@router.message(MenuButton(MENU_QUICK_MEETING))
 async def quick_start(
     message: Message, state: FSMContext, grants: dict[str, Grant],
     features: dict[str, bool],
@@ -1066,7 +1067,7 @@ async def task_save(
         return
 
     await state.clear()
-    when = f"\nСрок: {humanize_due(due_at, user.timezone)}" if due_at else ""
+    when = f"\nСрок: {humanize_due(due_at, user.timezone, user.locale)}" if due_at else ""
     await message.answer(
         f"➕ Поручение для {esc(assignee.full_name)}:\n<b>{esc(task.title)}</b>{when}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[

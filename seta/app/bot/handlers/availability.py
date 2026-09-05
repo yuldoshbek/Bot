@@ -9,7 +9,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import BTN_AVAILABILITY, BTN_WHO_IS_OPEN, availability_kb
+from app.bot.keyboards.common import MenuButton, MENU_AVAILABILITY, MENU_WHO_IS_OPEN, availability_kb
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.config import settings
 from app.core.text import esc
@@ -33,7 +33,7 @@ def _minutes_until_end_of_day(user: User) -> int:
     return max(15, int((end_local - now_local).total_seconds() // 60))
 
 
-@router.message(F.text == BTN_AVAILABILITY)
+@router.message(MenuButton(MENU_AVAILABILITY))
 async def show_availability(
     message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
@@ -111,7 +111,7 @@ async def switch_availability(
     )
 
 
-@router.message(F.text == BTN_WHO_IS_OPEN)
+@router.message(MenuButton(MENU_WHO_IS_OPEN))
 async def who_is_open(
     message: Message, session: AsyncSession, organization: Organization,
     user: User, grants: dict[str, Grant],

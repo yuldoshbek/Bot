@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.utils import STALE_BUTTON, callback_int
+from app.bot.utils import callback_int
 from app.bot.keyboards.common import (
     approval_kb,
     department_choice_kb,
@@ -20,13 +20,14 @@ from app.bot.keyboards.common import (
     request_contact_kb,
     role_choice_kb,
 )
+from app.core.i18n import t
 from app.core.text import esc
 from app.models.enums import RoleCode, UserStatus
 from app.models.org import Organization
 from app.models.rbac import Role, UserRole
 from app.models.user import User
 from app.services.availability import get_view
-from app.services.rbac import ELEVATED_ROLES, ROLE_TITLES, user_role_codes
+from app.services.rbac import ELEVATED_ROLES, role_title, role_titles, user_role_codes
 from app.services.registration import (
     RegistrationError,
     has_any_admin,
@@ -47,10 +48,11 @@ class Reg(StatesGroup):
 
 
 @router.message(Command("id"))
-async def cmd_id(message: Message) -> None:
+async def cmd_id(message: Message, locale: str) -> None:
     await message.answer(
-        f"Ваш Telegram ID: <code>{message.from_user.id}</code>\n\n"
-        "Он нужен, чтобы назначить первого администратора системы."
+        t("start.your_id", locale, id=message.from_user.id)
+        + "\n\n"
+        + t("start.id_hint", locale)
     )
 
 
@@ -65,21 +67,22 @@ async def cmd_start(
     user: User | None,
     roles: set[RoleCode],
     features: dict[str, bool],
+    locale: str,
 ) -> None:
     if user is not None and user.status == UserStatus.ACTIVE:
         await state.clear()
-        await message.answer(await greeting(session, user, roles), reply_markup=main_menu(roles, features))
-        return
-
-    if user is not None and user.status == UserStatus.PENDING:
         await message.answer(
-            "Ваша заявка уже отправлена администратору.\n"
-            "Как только её подтвердят, бот пришлёт уведомление."
+            await greeting(session, user, roles, locale),
+            reply_markup=main_menu(roles, features, locale),
         )
         return
 
+    if user is not None and user.status == UserStatus.PENDING:
+        await message.answer(t("start.already_pending", locale))
+        return
+
     if user is not None and user.status in (UserStatus.REJECTED, UserStatus.SUSPENDED):
-        await message.answer("Доступ к системе закрыт. Обратитесь к администратору.")
+        await message.answer(t("start.closed", locale))
         return
 
     await state.clear()
@@ -90,10 +93,7 @@ async def cmd_start(
     if payload.startswith("inv_"):
         invite = await resolve_invite(session, payload[4:])
         if invite is None:
-            await message.answer(
-                "Ссылка-приглашение недействительна или уже использована.\n"
-                "Попросите администратора прислать новую."
-            )
+            await message.answer(t("start.invite_bad", locale))
             return
 
     await state.update_data(
@@ -102,72 +102,77 @@ async def cmd_start(
         invite_department_id=invite.department_id if invite else None,
     )
 
-    hello = "Здравствуйте! Это корпоративный помощник по встречам и поручениям."
+    hello = t("start.hello", locale)
     if invite is not None and invite.label:
-        hello += f"\nПриглашение: <b>{esc(invite.label)}</b>"
+        hello += "\n" + t("start.invite_label", locale, label=esc(invite.label))
 
-    await message.answer(f"{hello}\n\nКак вас зовут? Напишите фамилию и имя.", reply_markup=ReplyKeyboardRemove())
+    await message.answer(
+        f"{hello}\n\n" + t("start.ask_name", locale),
+        reply_markup=ReplyKeyboardRemove(),
+    )
     await state.set_state(Reg.name)
 
 
 @router.message(Reg.name, F.text)
 async def reg_name(
-    message: Message, state: FSMContext, session: AsyncSession, organization: Organization
+    message: Message, state: FSMContext, session: AsyncSession,
+    organization: Organization, locale: str,
 ) -> None:
     full_name = message.text.strip()
     if len(full_name) < 3:
-        await message.answer("Слишком короткое имя. Напишите фамилию и имя целиком.")
+        await message.answer(t("start.name_too_short", locale))
         return
 
     await state.update_data(full_name=full_name)
     data = await state.get_data()
 
     if data.get("invite_department_id"):
-        await ask_role_or_contact(message, state)
+        await ask_role_or_contact(message, state, locale)
         return
 
     departments = await list_departments(session, organization.id)
     if not departments:
         await state.update_data(department_id=None)
-        await ask_role_or_contact(message, state)
+        await ask_role_or_contact(message, state, locale)
         return
 
     await message.answer(
-        "В каком подразделении вы работаете?",
-        reply_markup=department_choice_kb([(d.id, d.name) for d in departments]),
+        t("start.ask_department", locale),
+        reply_markup=department_choice_kb([(d.id, d.name) for d in departments], locale),
     )
     await state.set_state(Reg.department)
 
 
 @router.callback_query(Reg.department, F.data.startswith("reg:dept:"))
-async def reg_department(call: CallbackQuery, state: FSMContext) -> None:
+async def reg_department(call: CallbackQuery, state: FSMContext, locale: str) -> None:
     dept_id = callback_int(call.data)
     if dept_id is None:
-        await call.answer(STALE_BUTTON, show_alert=True)
+        await call.answer(t("error.stale_button", locale), show_alert=True)
         return
     await state.update_data(department_id=dept_id or None)
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer()
-    await ask_role_or_contact(call.message, state)
+    await ask_role_or_contact(call.message, state, locale)
 
 
-async def ask_role_or_contact(message: Message, state: FSMContext) -> None:
+async def ask_role_or_contact(message: Message, state: FSMContext, locale: str) -> None:
     data = await state.get_data()
     if data.get("invite_role"):
-        await ask_contact(message, state)
+        await ask_contact(message, state, locale)
         return
-    await message.answer("Какая у вас роль в системе?", reply_markup=role_choice_kb())
+    await message.answer(t("start.ask_role", locale), reply_markup=role_choice_kb(locale))
     await state.set_state(Reg.role)
 
 
 @router.callback_query(Reg.role, F.data.startswith("reg:role:"))
 async def reg_role(
-    call: CallbackQuery, state: FSMContext, session: AsyncSession, organization: Organization
+    call: CallbackQuery, state: FSMContext, session: AsyncSession,
+    organization: Organization, locale: str,
 ) -> None:
     try:
         role = RoleCode(call.data.rsplit(":", 1)[1])
     except ValueError:
-        await call.answer(STALE_BUTTON, show_alert=True)
+        await call.answer(t("error.stale_button", locale), show_alert=True)
         return
     await state.update_data(requested_role=role)
     await call.message.edit_reply_markup(reply_markup=None)
@@ -177,15 +182,15 @@ async def reg_role(
     # в пустой системе первый вошедший получает доступ сразу.
     if role in ELEVATED_ROLES and await has_any_admin(session, organization.id):
         await call.message.answer(
-            f"Роль «{ROLE_TITLES[role]}» подтверждает администратор — это займёт немного времени."
+            t("start.role_needs_approval", locale, role=role_title(role, locale))
         )
-    await ask_contact(call.message, state)
+    await ask_contact(call.message, state, locale)
 
 
-async def ask_contact(message: Message, state: FSMContext) -> None:
+async def ask_contact(message: Message, state: FSMContext, locale: str) -> None:
     await message.answer(
-        "Последний шаг — подтвердите номер телефона кнопкой ниже.",
-        reply_markup=request_contact_kb(),
+        t("start.ask_contact", locale),
+        reply_markup=request_contact_kb(locale),
     )
     await state.set_state(Reg.contact)
 
@@ -197,10 +202,11 @@ async def reg_contact(
     session: AsyncSession,
     organization: Organization,
     features: dict[str, bool],
+    locale: str,
     bot: Bot,
 ) -> None:
     if message.contact.user_id != message.from_user.id:
-        await message.answer("Пожалуйста, отправьте свой собственный номер — кнопкой ниже.")
+        await message.answer(t("start.own_number", locale))
         return
 
     data = await state.get_data()
@@ -235,30 +241,22 @@ async def reg_contact(
 
     if user.status == UserStatus.ACTIVE:
         roles = await user_role_codes(session, user)
-        text = f"Готово, {esc(user.full_name)}. Вы в системе."
+        text = t("start.done", locale, name=esc(user.full_name))
         if RoleCode.ADMIN in roles:
-            text += (
-                "\n\nВы первый в системе, поэтому вам выдана роль "
-                "<b>администратора</b> — подтверждать заявки было бы некому.\n\n"
-                "С чего начать:\n"
-                "1. «🛠 Администрирование» → «Отделы» — заведите подразделения\n"
-                "2. «Ссылки-приглашения» — отправьте ссылку в чат отдела\n"
-                "3. Руководителю дайте зарегистрироваться и подтвердите его заявку"
-            )
-        await message.answer(text, reply_markup=main_menu(roles, features))
+            text += "\n\n" + t("start.first_admin", locale)
+        await message.answer(text, reply_markup=main_menu(roles, features, locale))
         return
 
     await message.answer(
-        "Заявка отправлена администратору.\n"
-        "Как только её подтвердят, бот пришлёт уведомление — повторно писать не нужно.",
+        t("start.request_sent", locale),
         reply_markup=ReplyKeyboardRemove(),
     )
     await notify_admins(bot, session, user)
 
 
 @router.message(Reg.contact)
-async def reg_contact_fallback(message: Message) -> None:
-    await message.answer("Нажмите кнопку «📱 Подтвердить номер» — вводить номер вручную не нужно.")
+async def reg_contact_fallback(message: Message, locale: str) -> None:
+    await message.answer(t("start.press_contact", locale))
 
 
 async def notify_admins(bot: Bot, session: AsyncSession, applicant: User) -> None:
@@ -282,8 +280,7 @@ async def notify_admins(bot: Bot, session: AsyncSession, applicant: User) -> Non
     )
     admins = list(rows.scalars().unique().all())
 
-    role_title = ROLE_TITLES.get(RoleCode(applicant.requested_role), applicant.requested_role)
-    department = "не указано"
+    department = None
     if applicant.department_id:
         from app.models.org import Department
 
@@ -293,28 +290,40 @@ async def notify_admins(bot: Bot, session: AsyncSession, applicant: User) -> Non
         if dept:
             department = dept.name
 
-    text = (
-        "📥 <b>Новая заявка на регистрацию</b>\n\n"
-        f"👤 {esc(applicant.full_name)}\n"
-        f"🏢 {esc(department)}\n"
-        f"🔑 Запрошенная роль: <b>{role_title}</b>\n"
-        f"📱 {esc(applicant.phone) or 'номер не подтверждён'}"
-    )
+    # Текст собирается внутри цикла, а не один раз до него: у каждого
+    # администратора свой язык. Одно сообщение на всех показало бы половине
+    # из них чужой язык — и это единственное сообщение, которое они видят
+    # до того, как вообще войдут в систему.
     for admin in admins:
+        text = "\n\n".join([
+            t("start.new_application", admin.locale),
+            "\n".join([
+                f"👤 {esc(applicant.full_name)}",
+                f"🏢 {esc(department) if department else t('profile.department_none', admin.locale)}",
+                "🔑 " + t("start.requested_role", admin.locale,
+                          role=role_title(applicant.requested_role, admin.locale)),
+                f"📱 {esc(applicant.phone) or t('profile.phone_none', admin.locale)}",
+            ]),
+        ])
         try:
             await bot.send_message(
-                admin.telegram_user_id, text, reply_markup=approval_kb(applicant.id)
+                admin.telegram_user_id, text,
+                reply_markup=approval_kb(applicant.id, admin.locale),
             )
         except Exception:  # администратор мог заблокировать бота
             continue
 
 
-async def greeting(session: AsyncSession, user: User, roles: set[RoleCode]) -> str:
-    titles = ", ".join(ROLE_TITLES[r] for r in sorted(roles, key=lambda r: r.value)) or "Сотрудник"
-    lines = [f"С возвращением, <b>{esc(user.full_name)}</b>.", f"Роль: {titles}"]
+async def greeting(
+    session: AsyncSession, user: User, roles: set[RoleCode], locale: str | None = None
+) -> str:
+    lines = [
+        t("start.welcome_back", locale, name=esc(user.full_name)),
+        t("start.role_line", locale, roles=role_titles(roles, locale)),
+    ]
 
     if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
         view = await get_view(session, user.id)
-        lines.append(f"Доступность: {view.render(user.timezone)}")
+        lines.append(t("start.availability_line", locale, state=view.render(user.timezone)))
 
     return "\n".join(lines)

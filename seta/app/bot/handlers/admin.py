@@ -15,7 +15,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import BTN_ADMIN, admin_menu_kb, approval_kb, approval_role_kb
+from app.bot.keyboards.common import MenuButton, MENU_ADMIN, admin_menu_kb, approval_kb, approval_role_kb
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.text import esc
 from app.core.timeutil import fmt_dt
@@ -68,7 +68,7 @@ async def _applicant_of(
     return applicant
 
 
-@router.message(F.text == BTN_ADMIN)
+@router.message(MenuButton(MENU_ADMIN))
 async def admin_menu(message: Message, session: AsyncSession, organization: Organization, grants: dict[str, Grant]) -> None:
     if not _require(grants, "admin.users"):
         await message.answer("Раздел доступен администратору.")

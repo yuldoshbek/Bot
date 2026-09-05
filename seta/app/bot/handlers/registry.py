@@ -21,7 +21,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import BTN_DECISIONS, BTN_SEARCH
+from app.bot.keyboards.common import MenuButton, MENU_DECISIONS, MENU_SEARCH
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt, to_local, utcnow
@@ -53,7 +53,7 @@ class NewDecision(StatesGroup):
 
 
 # ── Поиск ───────────────────────────────────────────────────────────────────
-@router.message(F.text == BTN_SEARCH)
+@router.message(MenuButton(MENU_SEARCH))
 async def search_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
@@ -109,7 +109,7 @@ async def search_run(
 
 
 # ── Реестр решений ──────────────────────────────────────────────────────────
-@router.message(F.text == BTN_DECISIONS)
+@router.message(MenuButton(MENU_DECISIONS))
 async def decisions_list(
     message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:

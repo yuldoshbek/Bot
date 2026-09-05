@@ -16,7 +16,7 @@ from aiogram.types import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import BTN_CONTROL, BTN_MY_TASKS, BTN_NEW_TASK, main_menu
+from app.bot.keyboards.common import MenuButton, MENU_CONTROL, MENU_MY_TASKS, MENU_NEW_TASK, main_menu
 from app.bot.utils import STALE_BUTTON, callback_int
 from app.core.dates import humanize_due, parse_due
 from app.core.text import cut, esc
@@ -62,7 +62,7 @@ class TaskInput(StatesGroup):
 
 
 # ─────────────────────────  СОЗДАНИЕ  ─────────────────────────
-@router.message(F.text == BTN_NEW_TASK)
+@router.message(MenuButton(MENU_NEW_TASK))
 async def new_task(
     message: Message, state: FSMContext, session: AsyncSession,
     organization: Organization, user: User, grants: dict[str, Grant],
@@ -173,7 +173,7 @@ async def new_task_due(message: Message, state: FSMContext, user: User) -> None:
 
     await state.update_data(due_at=due_at.isoformat())
     await message.answer(
-        f"⏰ Срок: <b>{humanize_due(due_at, user.timezone)}</b>\n\nКакой приоритет?",
+        f"⏰ Срок: <b>{humanize_due(due_at, user.timezone, user.locale)}</b>\n\nКакой приоритет?",
         reply_markup=_priority_kb(),
     )
     await state.set_state(NewTask.priority)
@@ -245,7 +245,7 @@ async def new_task_priority(
         f"✅ <b>Поручение создано</b>\n\n"
         f"📋 {esc(cut(task.title, 200))}\n"
         f"👤 {esc(assignee.full_name)}\n"
-        f"⏰ {humanize_due(task.due_at, user.timezone) if task.due_at else 'без срока'}\n"
+        f"⏰ {humanize_due(task.due_at, user.timezone, user.locale) if task.due_at else 'без срока'}\n"
         f"🔺 {PRIORITY_LABELS[priority]}{review_line}\n\n"
         f"Исполнителю отправлено уведомление.",
         reply_markup=_task_kb_minimal(task.id),
@@ -253,7 +253,7 @@ async def new_task_priority(
 
 
 # ─────────────────────────  СПИСКИ  ─────────────────────────
-@router.message(F.text == BTN_MY_TASKS)
+@router.message(MenuButton(MENU_MY_TASKS))
 async def my_tasks(message: Message, session: AsyncSession, user: User) -> None:
     await _show_bucket(message, session, user, "active")
 
@@ -279,7 +279,7 @@ async def _show_bucket(
     else:
         lines = [f"<b>{title}: {len(items)}</b>", ""]
         for task in items:
-            due = f" · {humanize_due(task.due_at, user.timezone)}" if task.due_at else ""
+            due = f" · {humanize_due(task.due_at, user.timezone, user.locale)}" if task.due_at else ""
             lines.append(f"{STATUS_LABELS[TaskStatus(task.status)]}{due}\n📋 {esc(cut(task.title, 120))}")
         text = "\n\n".join(lines)
 
@@ -290,7 +290,7 @@ async def _show_bucket(
         await message.answer(text, reply_markup=keyboard)
 
 
-@router.message(F.text == BTN_CONTROL)
+@router.message(MenuButton(MENU_CONTROL))
 async def control(
     message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> None:
@@ -513,7 +513,7 @@ async def input_extension_date(message: Message, state: FSMContext, user: User) 
     await state.update_data(new_due=new_due.isoformat())
     await state.set_state(TaskInput.extension_reason)
     await message.answer(
-        f"Новый срок: <b>{humanize_due(new_due, user.timezone)}</b>\n\n"
+        f"Новый срок: <b>{humanize_due(new_due, user.timezone, user.locale)}</b>\n\n"
         "Почему нужен перенос? Причина уйдёт автору поручения."
     )
 
@@ -566,7 +566,7 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
         f"✍️ Автор: {author}",
     ]
     if task.due_at:
-        lines.append(f"⏰ Срок: {humanize_due(task.due_at, viewer.timezone)}")
+        lines.append(f"⏰ Срок: {humanize_due(task.due_at, viewer.timezone, viewer.locale)}")
     lines.append(f"🔺 Приоритет: {PRIORITY_LABELS[Priority(task.priority)]}")
     if task.description:
         lines += ["", esc(cut(task.description, 800))]
@@ -584,7 +584,7 @@ async def _render_task(session: AsyncSession, task: Task, viewer: User) -> str:
     if extension is not None:
         lines += [
             "",
-            f"⏰ <b>Просят перенести срок</b> на {humanize_due(extension.new_due_at, viewer.timezone)}",
+            f"⏰ <b>Просят перенести срок</b> на {humanize_due(extension.new_due_at, viewer.timezone, viewer.locale)}",
             f"💬 {esc(cut(extension.reason, 300))}",
         ]
 

@@ -936,8 +936,13 @@ async def main() -> None:
     async with session_scope() as session:
         # Любое поручение организации: руководитель видит их все, а шаблон
         # заводится из карточки, которая ему открыта.
+        # ORDER BY обязателен: без него PostgreSQL отдаёт строку в том порядке,
+        # в каком она лежит на диске, и выбор менялся от прогона к прогону —
+        # в зависимости от того, что запускалось раньше. Проверка то проходила,
+        # то нет, и выглядела случайной.
         task_id = await session.scalar(
-            select(Task.id).where(Task.organization_id == ids["org"]).limit(1)
+            select(Task.id).where(Task.organization_id == ids["org"])
+            .order_by(Task.id).limit(1)
         )
     check(task_id is not None, "в организации есть поручение для шаблона", str(task_id))
     if task_id:
@@ -981,6 +986,11 @@ async def main() -> None:
                     Task.organization_id == ids["org"],
                     Task.title == template_title,
                     Task.status == TaskStatus.NEW,
+                    # Само поручение, из которого сделан шаблон, носит то же
+                    # название и тоже бывает в статусе «Новое». Без этой строки
+                    # проверка считала его вместе с созданными и находила два
+                    # там, где создано одно.
+                    Task.id != task_id,
                 )
             )
         check(int(born or 0) == 1, "и создали одно поручение, а не десять", f"их {born}")

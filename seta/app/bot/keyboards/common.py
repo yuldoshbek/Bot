@@ -1,109 +1,192 @@
-"""Клавиатуры. Максимум 5-7 кнопок на экран, понятные названия, без техники."""
+"""Клавиатуры. Максимум 5-7 кнопок на экран, понятные названия, без техники.
+
+**Кнопка нижнего меню — это текст сообщения.** Telegram присылает не код
+кнопки, а её надпись, поэтому обработчик ловит её сравнением строк. Как только
+надписи стали переводиться, сравнение с одной строкой перестало работать:
+человек с узбекским интерфейсом жмёт «Profil», а обработчик ждёт «Профиль».
+
+Отсюда `MenuButton`: фильтр сверяет надпись со **всеми** переводами ключа.
+Это не только чинит перевод, но и решает вторую задачу, которую иначе пришлось
+бы решать отдельно: Telegram не обновляет нижнюю клавиатуру, уже лежащую
+в чате. После смены языка человек какое-то время жмёт старые кнопки — и они
+обязаны работать.
+"""
+from aiogram.filters import Filter
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    Message,
     ReplyKeyboardMarkup,
 )
 
+from app.core.i18n import LOCALES, t
 from app.models.enums import RoleCode
 
-# ── Названия пунктов главного меню ──────────────────────────────────────────
-BTN_MY_DAY = "📅 Мой день"
-BTN_MY_MEETINGS = "📅 Мои встречи"
-BTN_MY_TASKS = "📋 Мои поручения"
-BTN_REQUEST_MEETING = "➕ Запросить встречу"
-BTN_NEW_TASK = "➕ Поручение"
-BTN_QUICK_MEETING = "⚡ Совещание"
-BTN_DECISIONS = "📌 Решения"
-BTN_SEARCH = "🔎 Поиск"
-BTN_CONTROL = "📊 Контроль"
-BTN_AVAILABILITY = "🟢 Моя доступность"
-BTN_WHO_IS_OPEN = "👤 Кто на связи"
-BTN_ADMIN = "🛠 Администрирование"
-BTN_PROFILE = "👤 Профиль"
-BTN_HELP = "❓ Помощь"
+# ── Пункты главного меню ────────────────────────────────────────────────────
+# Ключи, а не надписи: надпись зависит от языка, ключ — нет.
+MENU_MY_DAY = "menu.my_day"
+MENU_MY_MEETINGS = "menu.my_meetings"
+MENU_MY_TASKS = "menu.my_tasks"
+MENU_REQUEST_MEETING = "menu.request_meeting"
+MENU_NEW_TASK = "menu.new_task"
+MENU_QUICK_MEETING = "menu.quick_meeting"
+MENU_DECISIONS = "menu.decisions"
+MENU_SEARCH = "menu.search"
+MENU_CONTROL = "menu.control"
+MENU_AVAILABILITY = "menu.availability"
+MENU_WHO_IS_OPEN = "menu.who_is_open"
+MENU_ADMIN = "menu.admin"
+MENU_PROFILE = "menu.profile"
+MENU_HELP = "menu.help"
+
+
+def texts_for(key: str) -> set[str]:
+    """Все надписи одной кнопки — на всех языках сразу.
+
+    Нужно для разбора входящего сообщения: язык человека мог смениться,
+    а кнопка в чате осталась прежней.
+    """
+    return {t(key, locale) for locale in LOCALES}
+
+
+class MenuButton(Filter):
+    """Нажата кнопка меню — на любом из языков."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    async def __call__(self, message: Message) -> bool:
+        # Надписи собираются на каждый вызов, а не в __init__: фильтры
+        # создаются при импорте обработчиков, и словари к этому моменту
+        # могут быть ещё не загружены.
+        return message.text in texts_for(self.key)
 
 
 # Какие кнопки исчезают вместе с выключенным разделом. Кнопка — только половина
 # выключения: обработчик за ней обязан отказать сам, иначе старая кнопка
 # в истории чата продолжит открывать закрытый раздел.
 FEATURE_BUTTONS: dict[str, set[str]] = {
-    "meetings": {BTN_MY_DAY, BTN_MY_MEETINGS, BTN_REQUEST_MEETING, BTN_QUICK_MEETING},
+    "meetings": {MENU_MY_DAY, MENU_MY_MEETINGS, MENU_REQUEST_MEETING, MENU_QUICK_MEETING},
 }
 
 
 def main_menu(
-    roles: set[RoleCode], features: dict[str, bool] | None = None
+    roles: set[RoleCode],
+    features: dict[str, bool] | None = None,
+    locale: str | None = None,
 ) -> ReplyKeyboardMarkup:
-    """Меню собирается по ролям и по включённым разделам."""
+    """Меню собирается по ролям, по включённым разделам и на языке человека."""
+    def key(name: str) -> KeyboardButton:
+        return KeyboardButton(text=t(name, locale))
+
     rows: list[list[KeyboardButton]] = []
+    layout: list[list[str]]
 
     if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
-        rows.append([KeyboardButton(text=BTN_MY_DAY), KeyboardButton(text=BTN_CONTROL)])
-        rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_AVAILABILITY)])
-        rows.append([KeyboardButton(text=BTN_QUICK_MEETING), KeyboardButton(text=BTN_DECISIONS)])
-        rows.append([KeyboardButton(text=BTN_SEARCH)])
+        layout = [
+            [MENU_MY_DAY, MENU_CONTROL],
+            [MENU_NEW_TASK, MENU_AVAILABILITY],
+            [MENU_QUICK_MEETING, MENU_DECISIONS],
+            [MENU_SEARCH],
+        ]
     elif RoleCode.DEPT_HEAD in roles:
-        rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
-        rows.append([KeyboardButton(text=BTN_NEW_TASK), KeyboardButton(text=BTN_CONTROL)])
-        rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_QUICK_MEETING)])
-        rows.append([KeyboardButton(text=BTN_DECISIONS), KeyboardButton(text=BTN_SEARCH)])
+        layout = [
+            [MENU_MY_MEETINGS, MENU_MY_TASKS],
+            [MENU_NEW_TASK, MENU_CONTROL],
+            [MENU_REQUEST_MEETING, MENU_QUICK_MEETING],
+            [MENU_DECISIONS, MENU_SEARCH],
+        ]
     else:
-        rows.append([KeyboardButton(text=BTN_MY_MEETINGS), KeyboardButton(text=BTN_MY_TASKS)])
-        rows.append([KeyboardButton(text=BTN_REQUEST_MEETING), KeyboardButton(text=BTN_WHO_IS_OPEN)])
-        rows.append([KeyboardButton(text=BTN_DECISIONS), KeyboardButton(text=BTN_SEARCH)])
+        layout = [
+            [MENU_MY_MEETINGS, MENU_MY_TASKS],
+            [MENU_REQUEST_MEETING, MENU_WHO_IS_OPEN],
+            [MENU_DECISIONS, MENU_SEARCH],
+        ]
 
     if features:
         hidden = {
-            text
+            name
             for code, buttons in FEATURE_BUTTONS.items()
             if not features.get(code, True)
-            for text in buttons
+            for name in buttons
         }
         if hidden:
-            rows = [
-                [button for button in row if button.text not in hidden] for row in rows
-            ]
-            rows = [row for row in rows if row]
+            layout = [[name for name in row if name not in hidden] for row in layout]
+            layout = [row for row in layout if row]
+
+    rows = [[key(name) for name in row] for row in layout]
 
     if RoleCode.ADMIN in roles:
-        rows.append([KeyboardButton(text=BTN_ADMIN)])
+        rows.append([key(MENU_ADMIN)])
 
-    rows.append([KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)])
+    rows.append([key(MENU_PROFILE), key(MENU_HELP)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def request_contact_kb() -> ReplyKeyboardMarkup:
+def request_contact_kb(locale: str | None = None) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Подтвердить номер", request_contact=True)]],
+        keyboard=[[KeyboardButton(text=t("start.contact_button", locale), request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def role_choice_kb() -> InlineKeyboardMarkup:
+def role_choice_kb(locale: str | None = None) -> InlineKeyboardMarkup:
     """Роли, которые можно запросить при самостоятельной регистрации."""
+    codes = ["EMPLOYEE", "DEPT_HEAD", "ASSISTANT", "EXECUTIVE"]
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Сотрудник", callback_data="reg:role:EMPLOYEE")],
-            [InlineKeyboardButton(text="Начальник отдела", callback_data="reg:role:DEPT_HEAD")],
-            [InlineKeyboardButton(text="Ассистент", callback_data="reg:role:ASSISTANT")],
-            [InlineKeyboardButton(text="Руководитель", callback_data="reg:role:EXECUTIVE")],
+            [InlineKeyboardButton(text=t(f"role.{code.lower()}", locale),
+                                  callback_data=f"reg:role:{code}")]
+            for code in codes
         ]
     )
 
 
-def department_choice_kb(departments: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+def department_choice_kb(
+    departments: list[tuple[int, str]], locale: str | None = None
+) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=name, callback_data=f"reg:dept:{dept_id}")]
         for dept_id, name in departments
     ]
-    rows.append([InlineKeyboardButton(text="Пропустить", callback_data="reg:dept:0")])
+    rows.append([InlineKeyboardButton(text=t("start.skip", locale), callback_data="reg:dept:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def approval_kb(user_id: int) -> InlineKeyboardMarkup:
+def language_button_kb(locale: str | None = None) -> InlineKeyboardMarkup:
+    """Одна кнопка под карточкой профиля: раскрыть выбор языка."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=t("profile.change_language", locale), callback_data="lang:menu"
+            )
+        ]]
+    )
+
+
+def language_kb(current: str, locale: str | None = None) -> InlineKeyboardMarkup:
+    """Выбор языка. Текущий отмечен галочкой — иначе непонятно, что уже стоит.
+
+    Названия языков не переводятся: язык называется на самом себе, чтобы его
+    узнал тот, кто нынешнего интерфейса не понимает. Это и есть тот человек,
+    ради которого экран существует.
+    """
+    from app.core.i18n import available, normalize
+
+    current = normalize(current)
+    rows = [
+        [InlineKeyboardButton(
+            text=("✅ " if code == current else "") + title,
+            callback_data=f"lang:{code}",
+        )]
+        for code, title in available()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def approval_kb(user_id: int, locale: str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -115,19 +198,20 @@ def approval_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def approval_role_kb(user_id: int) -> InlineKeyboardMarkup:
+def approval_role_kb(user_id: int, locale: str | None = None) -> InlineKeyboardMarkup:
     codes = [
-        (RoleCode.EMPLOYEE, "Сотрудник"),
-        (RoleCode.DEPT_HEAD, "Начальник отдела"),
-        (RoleCode.ASSISTANT, "Ассистент"),
-        (RoleCode.EXECUTIVE, "Руководитель"),
-        (RoleCode.ADMIN, "Администратор"),
+        RoleCode.EMPLOYEE, RoleCode.DEPT_HEAD, RoleCode.ASSISTANT,
+        RoleCode.EXECUTIVE, RoleCode.ADMIN,
     ]
     rows = [
-        [InlineKeyboardButton(text=title, callback_data=f"adm:setrole:{user_id}:{code}")]
-        for code, title in codes
+        [InlineKeyboardButton(
+            text=t(f"role.{code.value.lower()}", locale),
+            callback_data=f"adm:setrole:{user_id}:{code}",
+        )]
+        for code in codes
     ]
-    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"adm:card:{user_id}")])
+    rows.append([InlineKeyboardButton(text=t("common.back", locale),
+                                      callback_data=f"adm:card:{user_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
