@@ -217,6 +217,12 @@ async def close(
     grants = await load_grants(session, actor)
     if not has_permission(grants, "decision.close"):
         return Outcome(reason="Закрывать решения может руководитель или его ассистент.")
+    # Право закрывать не равно доступу к этому решению. Сегодня `decision.close`
+    # есть только у ролей с областью ORGANIZATION, которым открыто всё, и разницы
+    # не видно. Разница появится в тот день, когда право выдадут начальнику
+    # отдела: без этой строки он закрывал бы чужие решения по номеру.
+    if not await may_read(session, decision=decision, viewer=actor):
+        return Outcome(reason="Это решение вам не открыто.")
 
     reason = (reason or "").strip()
     if not done and not reason:
@@ -235,6 +241,47 @@ async def close(
         after={"status": decision.status}, reason=reason or None,
     )
     return Outcome(item=decision)
+
+
+async def may_read(session: AsyncSession, *, decision: Decision, viewer: User) -> bool:
+    """Открыто ли решение этому человеку. Единственная точка ответа на вопрос.
+
+    Отвечает ровно то же, что условие `visible_filter` в SQL. Пара нужна потому,
+    что список нельзя фильтровать после `LIMIT`, а одну запись нельзя открывать
+    выборкой: «загрузим пятьсот видимых и посмотрим, есть ли он там» врёт,
+    как только решений становится больше пятисот, — и врёт автору про его
+    собственное решение. Совпадение проверяется прогоном по матрице
+    «решение × человек» в `smoke_block4.py`.
+    """
+    if viewer.organization_id != decision.organization_id:
+        return False
+
+    grants = await load_grants(session, viewer)
+    scope = scope_of(grants, "decision.read")
+    if scope is None:
+        return False
+    if scope == Scope.ORGANIZATION:
+        return True
+
+    mine = viewer.id in (decision.author_id, decision.responsible_id)
+    if scope == Scope.DEPARTMENT:
+        # Порядок ветвей повторяет visible_filter буквально, включая случай
+        # «отделов не видно вообще»: там условие запроса заведомо ложно,
+        # значит и здесь ответ «нет» — даже на собственное решение.
+        visible = await visible_department_ids(session, viewer)
+        if not visible:
+            return False
+        if mine:
+            return True
+        people = set(
+            (
+                await session.execute(
+                    select(User.id).where(User.department_id.in_(visible))
+                )
+            ).scalars().all()
+        )
+        return decision.author_id in people or decision.responsible_id in people
+    return mine
 
 
 def visible_filter(

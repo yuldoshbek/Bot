@@ -207,8 +207,10 @@ async def _card_text(
         f"👤 Ведёт: {esc(owner.full_name) if owner else 'неизвестно'}",
     ]
     if len(people) > 1:
-        names = ", ".join(esc(p.full_name) for p in people if p.id != meeting.owner_id)
-        lines.append(f"👥 Участники: {cut(names, 200)}")
+        # Сначала обрезаем, потом экранируем: обратный порядок режет строку
+        # посреди `&lt;`, и Telegram не доставляет сообщение целиком.
+        names = ", ".join(p.full_name for p in people if p.id != meeting.owner_id)
+        lines.append(f"👥 Участники: {esc(cut(names, 200))}")
     if meeting.status == MeetingStatus.CANCELLED:
         lines.append(f"\n🚫 Отменена. Причина: {esc(meeting.cancel_reason or 'не указана')}")
     elif meeting.reschedule_count:

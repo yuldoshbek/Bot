@@ -162,13 +162,13 @@ async def decision_card(
 ) -> None:
     decision_id = callback_int(call.data)
     decision = await session.get(Decision, decision_id) if decision_id else None
-    if decision is None or decision.organization_id != user.organization_id:
+    if decision is None:
         await call.answer(STALE_BUTTON, show_alert=True)
         return
-    # Видимость проверяем тем же условием, что и список: отдельная проверка
-    # здесь означала бы третье описание одного правила.
-    visible = await service.registry(session, user=user, grants=grants, limit=500)
-    if decision.id not in {d.id for d in visible}:
+    # Видимость одной записи спрашивается у парной функции, а не выборкой
+    # видимого списка: выборка ограничена `LIMIT`, и решение старше
+    # пятисотого по дате отвечало бы «вам не открыто», хотя оно ваше.
+    if not await service.may_read(session, decision=decision, viewer=user):
         await call.answer("Это решение вам не открыто.", show_alert=True)
         return
 

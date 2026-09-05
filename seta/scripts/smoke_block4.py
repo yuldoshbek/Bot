@@ -8,6 +8,7 @@
 """
 import asyncio
 import io
+import re
 import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -15,9 +16,9 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 
-from app.core.db import session_scope
+from app.core.db import engine, session_scope
 from app.core.timeutil import utcnow
 from app.models import (
     AgendaItem,
@@ -1384,7 +1385,229 @@ async def main() -> None:
             f"{[h.title for h in hidden.documents]}",
         )
 
-    print("\n18. Уборка не трогает боевые данные")
+    print("\n18. Права на решение описаны дважды и совпадают")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker, head, helper_user = (
+            who["руководитель"], who["сотрудник"], who["начальник"], who["ассистент"]
+        )
+        outsider = (
+            await session.execute(
+                select(User).join(Organization, Organization.id == User.organization_id)
+                .where(Organization.name == f"{TEST_ORG_PREFIX}Чужая")
+            )
+        ).scalar_one()
+
+        made = []
+        for author, responsible, label in (
+            (chief, None, "решение руководителя"),
+            (chief, worker, "решение с ответственным сотрудником"),
+            (head, None, "решение начальника отдела"),
+        ):
+            outcome = await registry.create(
+                session, actor=author, title=f"ТЕСТ {label}", responsible=responsible
+            )
+            check(outcome.ok, f"внесено: {label}", outcome.reason or "")
+            made.append(outcome.item)
+        await session.flush()
+
+        mismatches = []
+        for decision in made:
+            for name, viewer in (
+                ("руководитель", chief), ("ассистент", helper_user),
+                ("начальник", head), ("сотрудник", worker), ("чужой", outsider),
+            ):
+                direct = await registry.may_read(session, decision=decision, viewer=viewer)
+                grants = await load_grants(session, viewer)
+                visible = await visible_department_ids(session, viewer)
+                by_sql = await session.scalar(
+                    select(Decision.id).where(
+                        Decision.id == decision.id,
+                        *registry.visible_filter(viewer, grants, visible),
+                    )
+                )
+                if direct != (by_sql is not None):
+                    mismatches.append(
+                        f"{decision.title}/{name}: прямо={direct}, запросом={by_sql is not None}"
+                    )
+        check(
+            not mismatches,
+            "проверка записи и условие запроса дают один ответ",
+            "; ".join(mismatches[:3]),
+        )
+        check(
+            not await registry.may_read(session, decision=made[0], viewer=outsider),
+            "чужая организация решение не видит",
+        )
+
+        # Тот самый случай, из-за которого карточка врала: видимость одной
+        # записи не должна зависеть от того, попала ли она в выборку реестра.
+        short_list = await registry.registry(
+            session, user=chief, grants=await load_grants(session, chief), limit=1
+        )
+        beyond = [d for d in made if d.id not in {x.id for x in short_list}]
+        check(bool(beyond), "решения за пределами короткой выборки есть", f"{len(beyond)}")
+        hidden = []
+        for decision in beyond:
+            if not await registry.may_read(session, decision=decision, viewer=chief):
+                hidden.append(decision.title)
+        check(
+            not hidden,
+            "и они всё равно открыты своему автору",
+            f"закрылись: {hidden[:2]}",
+        )
+
+        # Закрытие спрашивает не только право, но и доступ к записи.
+        # Ролью это сегодня не достаётся — право `decision.close` есть только
+        # у областей ORGANIZATION, — поэтому проверяем достижимый случай.
+        stranger_close = await registry.close(
+            session, decision=made[0], actor=outsider, done=True
+        )
+        check(
+            not stranger_close.ok,
+            "чужой не закрывает решение",
+            stranger_close.reason or "закрылось",
+        )
+        own_close = await registry.close(session, decision=made[2], actor=chief, done=True)
+        check(own_close.ok, "а руководитель закрывает своё", own_close.reason or "")
+
+    print("\n19. Выгрузка не превращает текст в формулы")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker = who["руководитель"], who["сотрудник"]
+        # Название обязано начинаться со знака равенства — иначе проверка
+        # не доходит до опасного случая и проходит при любом исходе.
+        # Уборка удаляет поручения по организации, а не по префиксу названия.
+        danger = "=cmd|'/c calc'!A1 ТЕСТ"
+        await task_service.create_task(
+            session, creator=chief, assignee=worker, title=danger,
+        )
+        await session.flush()
+
+        since, until = at(MONDAY - timedelta(days=120), 0), at(MONDAY + timedelta(days=60), 0)
+        data, _, why = await export.build(
+            session, user=chief, grants=await load_grants(session, chief),
+            kind="tasks", since=since, until=until, fmt="xlsx",
+        )
+        check(data is not None, "выгрузка собрана", why or "")
+
+        page = load_workbook(io.BytesIO(data)).active
+        formulas = [
+            cell.value
+            for row in page.iter_rows(min_row=2)
+            for cell in row
+            if cell.data_type == "f"
+        ]
+        check(not formulas, "ни одной формульной ячейки", f"{formulas[:2]}")
+        check(
+            any(danger in str(c.value) for row in page.iter_rows(min_row=2) for c in row),
+            "и текст сохранён как есть, без искажения",
+        )
+
+    print("\n20. Досье собирается один раз на встречу")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief, worker, head, helper_user = (
+            who["руководитель"], who["сотрудник"], who["начальник"], who["ассистент"]
+        )
+        org = await session.get(Organization, chief.organization_id)
+        crowd_day = MONDAY + timedelta(days=21)
+        crowded = Meeting(
+            organization_id=chief.organization_id, owner_id=chief.id,
+            title="ТЕСТ большое совещание", start_at=at(crowd_day, 15),
+            end_at=at(crowd_day, 16), status=MeetingStatus.CONFIRMED, created_by=chief.id,
+        )
+        session.add(crowded)
+        await session.flush()
+        for guest in (chief, worker, head, helper_user):
+            session.add(MeetingParticipant(
+                meeting_id=crowded.id, user_id=guest.id,
+                role=ParticipantRole.REQUIRED, created_at=utcnow(),
+            ))
+        # Незакрытое решение с ответственным-участником: без него общая часть
+        # была бы пустой и проверка ничего бы не измерила.
+        await registry.create(
+            session, actor=chief, title="ТЕСТ незакрытое по складу", responsible=worker
+        )
+        await session.flush()
+
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record)
+        try:
+            sent = await briefing.send_briefings(session, now=at(crowd_day, 14, 45))
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+        check(sent == 4, "досье ушло всем четверым", f"писем: {sent}")
+        # Общая часть собирается один раз на встречу, а не на каждого получателя.
+        # Четыре выборки решений вместо одной — это и есть «запросы в квадрате».
+        decision_queries = sum(1 for q in statements if "FROM decisions" in q)
+        check(
+            decision_queries == 1,
+            "решения выбраны один раз, а не на каждого участника",
+            f"запросов к decisions: {decision_queries} при четырёх получателях",
+        )
+
+    print("\n21. Обрезка списка участников не рубит HTML-сущность")
+    async with session_scope() as session:
+        who = await cast(session)
+        chief = who["руководитель"]
+        org = await session.get(Organization, chief.organization_id)
+        long_day = MONDAY + timedelta(days=28)
+
+        # Имя подобрано так, чтобы `<` пришлась ровно на границу обрезки.
+        # В открытом виде строка укладывается в предел (199 знаков) и не режется;
+        # в экранированном `&lt;` занимает 202 знака, и обрезка по 200 разрубила
+        # бы сущность пополам. Случайное имя сюда не попадает — проверка,
+        # которая не доходит до опасного случая, проходит при любом исходе.
+        tricky_name = "А" * 196 + "<" + "ББ"
+        check(len(tricky_name) == 199, "имя подобрано под границу", str(len(tricky_name)))
+        tricky = await person(session, org, tricky_name, RoleCode.EMPLOYEE, 953_000_001)
+
+        pair = Meeting(
+            organization_id=chief.organization_id, owner_id=chief.id,
+            title="ТЕСТ разговор вдвоём", start_at=at(long_day, 15),
+            end_at=at(long_day, 16), status=MeetingStatus.CONFIRMED, created_by=chief.id,
+        )
+        session.add(pair)
+        await session.flush()
+        for guest in (chief, tricky):
+            session.add(MeetingParticipant(
+                meeting_id=pair.id, user_id=guest.id,
+                role=ParticipantRole.REQUIRED, created_at=utcnow(),
+            ))
+        await session.flush()
+
+        sent = await briefing.send_briefings(session, now=at(long_day, 14, 45))
+        check(sent == 2, "досье ушло обоим", f"писем: {sent}")
+
+        letters = (
+            await session.execute(
+                select(Notification.body).where(
+                    Notification.event_key.like(f"meeting:{pair.id}:brief:%")
+                )
+            )
+        ).scalars().all()
+        check(len(letters) == 2, "писем в очереди два", f"{len(letters)}")
+        broken = [
+            body for body in letters
+            if re.search(r"&(?!(amp|lt|gt|quot|#\d+);)", body)
+        ]
+        check(
+            not broken,
+            "ни в одном письме нет разрубленной HTML-сущности",
+            (broken[0][-80:] if broken else ""),
+        )
+        check(
+            all("&lt;" in body for body in letters),
+            "а сама скобка на месте и экранирована целиком",
+        )
+
+    print("\n22. Уборка не трогает боевые данные")
     async with session_scope() as session:
         real_before = await session.scalar(
             select(func.count(User.id)).where(
