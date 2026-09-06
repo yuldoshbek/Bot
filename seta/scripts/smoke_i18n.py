@@ -96,7 +96,20 @@ def main() -> None:
     empty = [k for k, v in list(UZ.items()) + list(RU.items()) if not v.strip()]
     check(not empty, "пустых строк нет", str(empty[:5]))
 
-    print("\n2. Подстановки переживают перевод")
+    print("\n2. Ни один ключ не остался непереведённым")
+    # Одинаковый текст в двух языках — почти всегда забытая правка: строку
+    # скопировали из русского словаря в узбекский и не тронули. Законны такие
+    # совпадения там, где текста нет вовсе: значки, числа, чистая разметка.
+    untouched = []
+    for key in UZ:
+        if UZ[key] != RU[key]:
+            continue
+        bare = re.sub(r"<[^>]*>|\{[^}]*\}|[\s\d%·—–:.,()\[\]]|[^\w\s]", "", UZ[key])
+        if bare.strip():
+            untouched.append(key)
+    check(not untouched, f"проверено ключей: {len(UZ)}", str(untouched[:5]))
+
+    print("\n3. Подстановки переживают перевод")
     # Потерянное {name} не роняет ответ — оно просто исчезает вместе с именем.
     # Лишнее — наоборот, показывает человеку фигурные скобки. Оба случая
     # выглядят как «бот сломался», и оба видны только на живом сообщении.
@@ -105,12 +118,12 @@ def main() -> None:
     check(not lost, "русский не потерял подстановок", str(lost[:5]))
     check(not extra, "русский не добавил своих", str(extra[:5]))
 
-    print("\n3. Каждый ключ из кода есть в словаре")
+    print("\n4. Каждый ключ из кода есть в словаре")
     missing = {key: files for key, files in used_keys().items() if key not in UZ}
     check(not missing, f"проверено ключей в коде: {len(used_keys())}",
           str(sorted(missing.items())[:5]))
 
-    print("\n4. Перевод письменности")
+    print("\n5. Перевод письменности")
     cases = [
         ("Oʻzbekiston", "Ўзбекистон"), ("yoʻl", "йўл"), ("gʻalaba", "ғалаба"),
         ("shoʻrva", "шўрва"), ("eʼlon", "эълон"), ("chorshanba", "чоршанба"),
@@ -126,7 +139,7 @@ def main() -> None:
     results = {to_cyrillic(v) for v in variants}
     check(results == {"ўзбек"}, "любое начертание апострофа разбирается", str(results))
 
-    print("\n5. Перевод не трогает то, что не текст")
+    print("\n6. Перевод не трогает то, что не текст")
     sample = "<b>{name}</b> uchun {count} ta topshiriq: <i>shoshilinch</i>"
     got = to_cyrillic(sample)
     check("{name}" in got and "{count}" in got, "имена подстановок целы", got)
@@ -138,7 +151,7 @@ def main() -> None:
     check(not broken, f"разметка цела во всём словаре: {len(tags)} строк с тегами",
           str(broken[:2]))
 
-    print("\n6. Иностранное слово остаётся собой")
+    print("\n7. Иностранное слово остаётся собой")
     check(to_cyrillic("Excel va PDF") == "Excel ва PDF",
           "Excel и PDF не переводятся", to_cyrillic("Excel va PDF"))
     # Берётся то, что увидит человек, а не голое правило: исключения на то
@@ -153,7 +166,7 @@ def main() -> None:
     check(not latin_left, "непереведённой латиницы в кириллице не осталось",
           str(latin_left[:5]))
 
-    print("\n7. Исключения побеждают правило")
+    print("\n8. Исключения побеждают правило")
     check(t("month.9", DERIVED_LOCALE) == "сентябр",
           "сентябрь пишется по-кирилличному", t("month.9", DERIVED_LOCALE))
     check(to_cyrillic(UZ["month.9"]) != t("month.9", DERIVED_LOCALE),
@@ -169,7 +182,7 @@ def main() -> None:
     check(widths == {2}, "сокращения дней недели одной ширины на всех языках",
           str(sorted(widths)))
 
-    print("\n8. Отсутствие перевода не роняет ответ")
+    print("\n9. Отсутствие перевода не роняет ответ")
 
     def said(key: str, locale: str | None = None, **params) -> str | None:
         """None означает, что вызов упал.
@@ -195,7 +208,7 @@ def main() -> None:
     check(said("start.greeting", "ru", кто="Иван") == RU["start.greeting"],
           "чужое имя подстановки не роняет ответ")
 
-    print("\n9. Русский отстаёт — человек видит узбекский, а не пустоту")
+    print("\n10. Русский отстаёт — человек видит узбекский, а не пустоту")
     catalogue.load("ru", {k: v for k, v in RU.items() if k != "menu.search"})
     check(t("menu.search", "ru") == UZ["menu.search"],
           "непереведённый ключ показывает узбекскую строку", t("menu.search", "ru"))
@@ -215,7 +228,7 @@ def main() -> None:
     check(t("menu.search", DERIVED_LOCALE) == before_cyr, "эталон восстановлен",
           t("menu.search", DERIVED_LOCALE))
 
-    print("\n10. Код языка приводится к известному")
+    print("\n11. Код языка приводится к известному")
     for raw, expect in (
         (None, "uz"), ("", "uz"), ("uz", "uz"), ("uz-Cyrl", "uz-Cyrl"),
         ("uz_CYRL", "uz-Cyrl"), ("UZ-cyrl", "uz-Cyrl"), ("ru", "ru"),
@@ -223,7 +236,7 @@ def main() -> None:
     ):
         check(normalize(raw) == expect, f"«{raw}» → {expect}", normalize(raw))
 
-    print("\n11. Выбор языка принимает только язык")
+    print("\n12. Выбор языка принимает только язык")
     # `normalize` возвращает основной язык на что угодно, поэтому проверять
     # им же присланный код бессмысленно: «lang:menu» прошёл бы как «uz».
     for code in ("menu", "", "en", "de", "uz-Latn"):
@@ -231,7 +244,7 @@ def main() -> None:
     for code in ("uz", "uz-Cyrl", "ru"):
         check(code in LOCALES, f"«{code}» считается")
 
-    print("\n12. Кнопка меню узнаётся на любом языке")
+    print("\n13. Кнопка меню узнаётся на любом языке")
     for key in MENU_KEYS:
         texts = texts_for(key)
         check(len(texts) >= 2, f"{key}: переводов {len(texts)}", str(texts))
@@ -246,7 +259,7 @@ def main() -> None:
             seen[text] = key
     check(not collisions, "надписи кнопок нигде не совпадают", str(collisions[:3]))
 
-    print("\n13. Меню собирается на выбранном языке")
+    print("\n14. Меню собирается на выбранном языке")
     for locale, expect_key in (("uz", "menu.profile"), ("ru", "menu.profile"),
                                ("uz-Cyrl", "menu.profile")):
         buttons = {
@@ -264,7 +277,7 @@ def main() -> None:
     check(len(uz_menu) == len(ru_menu), "но состоит из тех же кнопок",
           f"{len(uz_menu)} и {len(ru_menu)}")
 
-    print("\n14. Разбор срока понимает оба языка")
+    print("\n15. Разбор срока понимает оба языка")
     from app.core.dates import MONTHS, WEEKDAYS
 
     # Каждое название по отдельности: пропущенное в справочнике слово
@@ -308,7 +321,7 @@ def main() -> None:
               f"«{text}» → {expect_day} сентября",
               str(got.astimezone(TZ_TASHKENT).date() if got else None))
 
-    print("\n15. Срок называется на языке собеседника")
+    print("\n16. Срок называется на языке собеседника")
     # Момент берётся от настоящих часов, а не от подставного `now` выше:
     # `humanize_due` сравнивает срок с сегодняшним днём по реальному времени,
     # и «завтра» от сентября 2026 года было бы «завтра» ровно один день в году.
@@ -371,7 +384,7 @@ async def with_database() -> None:
                 await session.execute(delete(Organization).where(Organization.id.in_(org_ids)))
 
     await cleanup()
-    print("\n16. Язык хранится у человека и меняет ответ")
+    print("\n17. Язык хранится у человека и меняет ответ")
     async with session_scope() as session:
         org = Organization(name=ORG, timezone="Asia/Tashkent")
         session.add(org)
@@ -407,7 +420,7 @@ async def with_database() -> None:
         check(not await button(Pressed("что-то postороннее")),
               "а на чужой текст не срабатывает")
 
-    print("\n17. Карточка поручения говорит на языке смотрящего")
+    print("\n18. Карточка поручения говорит на языке смотрящего")
     # Проверка поведения, а не наличия ключей: карточку собирают полтора десятка
     # вызовов, и достаточно одному забыть язык, чтобы русскоязычный человек
     # увидел узбекскую строку посреди русской карточки. Ключи при этом на месте,
@@ -533,7 +546,7 @@ async def with_database() -> None:
         check(RU["task.status.in_progress"] not in listed["uz"],
               "и статус в узбекском списке не русский", listed["uz"][:80])
 
-    print("\n18. В переведённых модулях не осталось русских строк")
+    print("\n19. В переведённых модулях не осталось русских строк")
     # Список того, что переведено целиком. Проверка идёт по исходнику: любая
     # русская строка-литерал в этих файлах означает забытый `t()`. Это ловит
     # то, чего не поймает ни проверка ключей (ключ-то на месте), ни проверка
@@ -565,6 +578,10 @@ async def with_database() -> None:
         "app/services/search.py",
         "app/services/briefing.py",
         "app/services/notifications.py",
+        "app/bot/handlers/admin.py",
+        "app/services/orgadmin.py",
+        "app/services/registration.py",
+        "app/bot/utils.py",
     ]
     # Что остаётся по-русски намеренно — и почему. Список именно строк,
     # а не файлов: иначе исключение для одной подписи закрыло бы весь файл,
@@ -587,6 +604,12 @@ async def with_database() -> None:
         "через ", " дней",
         # Строка журнала работы, а не сообщение человеку.
         "не доставлено пользователю %s: %s",
+        # Разбор ввода администратора: принимает оба языка сразу, независимо
+        # от настройки. Понимать и говорить — разные вещи.
+        r"(?:обед|tushlik|тушлик)\s+(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})",
+        r"(?:буфер|bufer|буфер)\s+(\d{1,3})",
+        r"(?:подряд|ketma-ket|кетма-кет)\s+(\d{1,2})",
+        "мес", "ой", "команд", "хизмат", "сафар", "больн", "касал",
     }
 
     for module in DONE_MODULES:
@@ -609,7 +632,7 @@ async def with_database() -> None:
         check(not russian, f"{module.split('/')[-1]}: русских строк нет",
               str([r[:40] for r in russian[:3]]))
 
-    print("\n19. Экран «Мой день» и показатели говорят на языке смотрящего")
+    print("\n20. Экран «Мой день» и показатели говорят на языке смотрящего")
     # Экран собирается из показателей, каждый со своим пояснением, и уходит
     # ещё и утренней сводкой. Забытый язык здесь виден сразу всем.
     from app.core.timeutil import utcnow as now_utc
@@ -640,7 +663,7 @@ async def with_database() -> None:
     check(UZ["dashboard.no_department"] in screens["uz"],
           "строка без отдела подписана на своём языке", screens["uz"][-90:])
 
-    print("\n20. Уведомление приходит на языке получателя, а не отправителя")
+    print("\n21. Уведомление приходит на языке получателя, а не отправителя")
     # Самое незаметное место перевода. Уведомление собирает тот, кто совершил
     # действие, а читает совсем другой человек — и языки у них разные. Ошибку
     # такого рода видит только получатель, и пожаловаться ему некому: сообщение

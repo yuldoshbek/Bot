@@ -25,6 +25,7 @@ from datetime import date, time
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.models import (
     Absence,
     AbsenceKind,
@@ -47,14 +48,13 @@ MAX_QUOTA_MINUTES = 60 * 40
 # Насколько вперёд разрешено заводить праздники и отпуска.
 MAX_HORIZON_DAYS = 366 * 2
 
-WEEKDAY_NAMES = (
-    "понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"
-)
-ABSENCE_TITLES = {
-    AbsenceKind.VACATION: "отпуск",
-    AbsenceKind.TRIP: "командировка",
-    AbsenceKind.SICK: "больничный",
-    AbsenceKind.OTHER: "отсутствие",
+# Ключи, а не названия: день недели и вид отсутствия человек видит на своём языке.
+WEEKDAY_KEYS = tuple(f"weekday.{i}" for i in range(7))
+ABSENCE_KEYS = {
+    AbsenceKind.VACATION: "absence.vacation",
+    AbsenceKind.TRIP: "absence.business_trip",
+    AbsenceKind.SICK: "absence.sick",
+    AbsenceKind.OTHER: "absence.other",
 }
 
 
@@ -110,25 +110,27 @@ async def set_hours(
     «сбросить» — иначе каждая правка требовала бы ввести всё заново.
     """
     if not _allowed(grants):
-        return Outcome(reason="Настройки меняет администратор.")
+        return Outcome(reason=t("orgadmin.err.rights", actor.locale))
     if subject.organization_id != actor.organization_id:
-        return Outcome(reason="Этот сотрудник из другой организации.")
+        return Outcome(reason=t("orgadmin.err.other_org_user", actor.locale))
     if start is not None and end is not None and end <= start:
-        return Outcome(reason="Конец рабочего дня должен быть позже начала.")
+        return Outcome(reason=t("orgadmin.err.end_before_start", actor.locale))
     if lunch_start is not None and lunch_end is not None and lunch_end <= lunch_start:
-        return Outcome(reason="Конец обеда должен быть позже начала.")
+        return Outcome(reason=t("orgadmin.err.lunch_end", actor.locale))
     if buffer_minutes is not None and not MIN_BUFFER <= buffer_minutes <= MAX_BUFFER:
-        return Outcome(reason=f"Буфер бывает от {MIN_BUFFER} до {MAX_BUFFER} минут.")
+        return Outcome(reason=t("orgadmin.err.buffer_range", actor.locale,
+                            min=MIN_BUFFER, max=MAX_BUFFER))
     if max_consecutive is not None and not MIN_CONSECUTIVE <= max_consecutive <= MAX_CONSECUTIVE:
         return Outcome(
-            reason=f"Встреч подряд бывает от {MIN_CONSECUTIVE} до {MAX_CONSECUTIVE}."
+            reason=t("orgadmin.err.row_range", actor.locale,
+                     min=MIN_CONSECUTIVE, max=MAX_CONSECUTIVE)
         )
 
     rows = await hours_of(session, subject)
     if weekday is not None:
         rows = [row for row in rows if row.weekday == weekday]
     if not rows:
-        return Outcome(reason="Для этого сотрудника расписание не заведено.")
+        return Outcome(reason=t("orgadmin.err.no_schedule", actor.locale))
 
     before = [_hours_snapshot(row) for row in rows]
 
@@ -142,17 +144,18 @@ async def set_hours(
         new_lunch_start = lunch_start if lunch_start is not None else row.lunch_start
         new_lunch_end = lunch_end if lunch_end is not None else row.lunch_end
         if new_end <= new_start:
-            return Outcome(
-                reason=f"{WEEKDAY_NAMES[row.weekday].capitalize()}: конец дня раньше начала."
-            )
+            return Outcome(reason=t(
+                "orgadmin.err.day_end_before", actor.locale,
+                day=t(WEEKDAY_KEYS[row.weekday], actor.locale).capitalize(),
+            ))
         # Обед должен помещаться в рабочий день: иначе расчёт окон вычтет
         # промежуток за его пределами и день молча укоротится не там, где ждали.
         if new_lunch_start is not None and new_lunch_end is not None:
             if new_lunch_start < new_start or new_lunch_end > new_end:
                 return Outcome(
-                    reason=(
-                        f"{WEEKDAY_NAMES[row.weekday].capitalize()}: "
-                        "обед должен быть внутри рабочего дня."
+                    reason=t(
+                        "orgadmin.err.lunch_outside", actor.locale,
+                        day=t(WEEKDAY_KEYS[row.weekday], actor.locale).capitalize(),
                     )
                 )
         planned.append((row, new_start, new_end, new_lunch_start, new_lunch_end))
@@ -214,24 +217,24 @@ async def set_quota(
     её величина: смысл нормы живёт в `quotas`, и дублировать его нельзя.
     """
     if not _allowed(grants):
-        return Outcome(reason="Лимиты задаёт администратор.")
+        return Outcome(reason=t("orgadmin.err.quota_rights", actor.locale))
     if owner.organization_id != actor.organization_id:
-        return Outcome(reason="Руководитель из другой организации.")
+        return Outcome(reason=t("orgadmin.err.other_org_owner", actor.locale))
     if subject_user is None and subject_department is None:
-        return Outcome(reason="Не указано, кому лимит.")
+        return Outcome(reason=t("orgadmin.err.no_subject", actor.locale))
     if subject_user is not None and subject_department is not None:
-        return Outcome(reason="Лимит задаётся либо человеку, либо отделу.")
+        return Outcome(reason=t("orgadmin.err.person_or_department", actor.locale))
     if subject_user is not None and subject_user.organization_id != actor.organization_id:
-        return Outcome(reason="Этот сотрудник из другой организации.")
+        return Outcome(reason=t("orgadmin.err.other_org_user", actor.locale))
     if (
         subject_department is not None
         and subject_department.organization_id != actor.organization_id
     ):
-        return Outcome(reason="Этот отдел из другой организации.")
+        return Outcome(reason=t("orgadmin.err.other_org_department", actor.locale))
     if not 0 <= minutes <= MAX_QUOTA_MINUTES:
-        return Outcome(reason=f"Лимит бывает от 0 до {MAX_QUOTA_MINUTES} минут.")
+        return Outcome(reason=t("orgadmin.err.quota_range", actor.locale, max=MAX_QUOTA_MINUTES))
     if period not in (QuotaPeriod.WEEK, QuotaPeriod.MONTH):
-        return Outcome(reason="Период бывает недельный или месячный.")
+        return Outcome(reason=t("orgadmin.err.bad_period", actor.locale))
 
     quota = (
         await session.execute(
@@ -302,13 +305,13 @@ async def set_holiday(
     от того, какая нашлась первой.
     """
     if not _allowed(grants):
-        return Outcome(reason="Календарь организации ведёт администратор.")
+        return Outcome(reason=t("orgadmin.err.calendar_rights", actor.locale))
     title = (title or "").strip()
     if len(title) < 2:
-        return Outcome(reason="Нужно название — хотя бы два знака.")
+        return Outcome(reason=t("orgadmin.err.need_title", actor.locale))
     horizon = (today or date.today())
     if abs((day - horizon).days) > MAX_HORIZON_DAYS:
-        return Outcome(reason="Слишком далеко: календарь ведётся на два года вперёд.")
+        return Outcome(reason=t("orgadmin.err.too_far", actor.locale))
 
     holiday = (
         await session.execute(
@@ -342,9 +345,9 @@ async def drop_holiday(
     session: AsyncSession, *, actor: User, grants: dict[str, Grant], holiday: Holiday
 ) -> str | None:
     if not _allowed(grants):
-        return "Календарь организации ведёт администратор."
+        return t("orgadmin.err.calendar_rights", actor.locale)
     if holiday.organization_id != actor.organization_id:
-        return "Это день другой организации."
+        return t("orgadmin.err.other_org_day", actor.locale)
     await write_audit(
         session, actor_id=actor.id, action="settings.holiday.delete",
         entity_type="holiday", entity_id=holiday.id,
@@ -385,20 +388,20 @@ async def set_absence(
 ) -> Outcome:
     """Заводит отсутствие. Влияет и на календарь, и на назначение сроков."""
     if not _allowed(grants):
-        return Outcome(reason="Отпуска заводит администратор.")
+        return Outcome(reason=t("orgadmin.err.absence_rights", actor.locale))
     if subject.organization_id != actor.organization_id:
-        return Outcome(reason="Этот сотрудник из другой организации.")
+        return Outcome(reason=t("orgadmin.err.other_org_user", actor.locale))
     if end_date < start_date:
-        return Outcome(reason="Конец отсутствия не может быть раньше начала.")
-    if kind not in ABSENCE_TITLES:
-        return Outcome(reason="Неизвестный вид отсутствия.")
+        return Outcome(reason=t("orgadmin.err.absence_end", actor.locale))
+    if kind not in ABSENCE_KEYS:
+        return Outcome(reason=t("orgadmin.err.unknown_kind", actor.locale))
     if substitute is not None:
         if substitute.organization_id != actor.organization_id:
-            return Outcome(reason="Замещающий из другой организации.")
+            return Outcome(reason=t("orgadmin.err.other_org_substitute", actor.locale))
         if substitute.id == subject.id:
-            return Outcome(reason="Человек не может замещать сам себя.")
+            return Outcome(reason=t("orgadmin.err.self_substitute", actor.locale))
         if substitute.status != UserStatus.ACTIVE:
-            return Outcome(reason="Замещающий должен быть действующим сотрудником.")
+            return Outcome(reason=t("orgadmin.err.substitute_inactive", actor.locale))
 
     # Пересечения запрещены: два отпуска на один день — это не два отпуска,
     # а ошибка ввода, и расчёт окон всё равно учтёт только факт отсутствия.
@@ -412,12 +415,14 @@ async def set_absence(
         )
     ).scalar_one_or_none()
     if overlap is not None:
-        return Outcome(
-            reason=(
-                f"На эти дни уже заведено: {ABSENCE_TITLES.get(overlap.kind, 'отсутствие')} "
-                f"{overlap.start_date:%d.%m}–{overlap.end_date:%d.%m}."
-            )
-        )
+        kind_key = ABSENCE_KEYS.get(overlap.kind, "absence.other")
+        return Outcome(reason=t(
+            "orgadmin.err.overlaps", actor.locale,
+            kind=(
+                f"{t(kind_key, actor.locale)} "
+                f"{overlap.start_date:%d.%m}–{overlap.end_date:%d.%m}"
+            ),
+        ))
 
     absence = Absence(
         user_id=subject.id,
@@ -448,10 +453,10 @@ async def drop_absence(
     session: AsyncSession, *, actor: User, grants: dict[str, Grant], absence: Absence
 ) -> str | None:
     if not _allowed(grants):
-        return "Отпуска ведёт администратор."
+        return t("orgadmin.err.absence_rights", actor.locale)
     subject = await session.get(User, absence.user_id)
     if subject is None or subject.organization_id != actor.organization_id:
-        return "Это запись другой организации."
+        return t("orgadmin.err.other_org_record", actor.locale)
     await write_audit(
         session, actor_id=actor.id, action="settings.absence.delete",
         entity_type="absence", entity_id=absence.id,
