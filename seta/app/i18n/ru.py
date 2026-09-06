@@ -1032,4 +1032,8 @@ TABLE: dict[str, str] = {
     "voice.text.title": "🎙 Расшифровка · {length}",
     "voice.text.kept": "Голосовое сохранено.",
     "voice.btn.task": "➕ Сделать поручением",
+
+    # ── Недельный отчёт ─────────────────────────────────────────────────────
+    "weekly.title": "📈 Итоги недели · {since}—{until}",
+    "weekly.was": "было {value}",
 }

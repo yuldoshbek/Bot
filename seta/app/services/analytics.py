@@ -106,6 +106,16 @@ class Metric:
         self.detail_key = key
         self.detail_args = args
 
+    def shown(self) -> str:
+        """Само число, без названия. Формат один на все места, где его печатают:
+        два описания одного формата разошлись бы на первом же дробном значении."""
+        if self.value is None:
+            return ""
+        return (
+            f"{self.value:.0f}" if float(self.value).is_integer()
+            else f"{self.value:.1f}"
+        )
+
     def render(self, locale: str | None = None) -> str:
         """Строка для сообщения. Пустой показатель говорит «нет данных»."""
         title = self.title(locale)
@@ -114,8 +124,7 @@ class Metric:
         if self.value is None:
             head = title
         else:
-            shown = f"{self.value:.0f}" if float(self.value).is_integer() else f"{self.value:.1f}"
-            head = f"{title}: {shown}{t(self.unit, locale) if self.unit else ''}"
+            head = f"{title}: {self.shown()}{t(self.unit, locale) if self.unit else ''}"
         detail = self.detail(locale)
         return f"{head} — {detail}" if detail else head
 

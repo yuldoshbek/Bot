@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai import models
 from app.ai.local import Local, Mixed
 from app.ai.provider import Answer, Fake, Heard, Provider, ProviderError
 from app.core.config import settings
@@ -133,7 +134,6 @@ async def ask(
     system: str,
     user: str,
     prompt_version: str,
-    model: str | None = None,
     user_id: int | None = None,
     needs_confirmation: bool = False,
 ) -> Outcome:
@@ -153,7 +153,10 @@ async def ask(
         log.warning("ИИ остановлен: %s", why)
         return Outcome(reason="budget")
 
-    chosen = model or settings.ai_model_routine
+    # Имя модели выбирается по виду вызова, а не приходит от сценария:
+    # иначе имена расходятся по коду, и объяснить, почему один сценарий стал
+    # дороже, будет нечем. Единственное место, где они берутся, — `models`.
+    chosen = models.name_for(kind)
     call = AiCall(
         organization_id=organization_id,
         user_id=user_id,
@@ -226,7 +229,7 @@ async def transcribe(
         kind="voice_transcribe",
         # Какой моделью слушали. У своей службы имя приходит в ответе
         # и дописывается ниже: журнал должен знать, кто именно расшифровал.
-        model=speaker.name if speaker.free_voice else settings.ai_model_voice,
+        model=speaker.name if speaker.free_voice else models.name_for("voice_transcribe"),
         prompt_version="-",
     )
     session.add(call)
@@ -234,7 +237,7 @@ async def transcribe(
 
     try:
         heard: Heard = await speaker.transcribe(
-            audio, model=settings.ai_model_voice, hint=hint
+            audio, model=models.name_for("voice_transcribe"), hint=hint
         )
     except ProviderError as error:
         call.finished_at = utcnow()

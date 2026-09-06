@@ -18,8 +18,10 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
-from app.ai import gate, summary
-from app.services import attendance, briefing, deadlines, digest, indexer, meetings
+from app.ai import gate, report as report_words, summary
+from app.services import (
+    attendance, briefing, deadlines, digest, indexer, meetings, weekly,
+)
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
 
@@ -140,6 +142,33 @@ async def digest_loop() -> None:
         await asyncio.sleep(DIGEST_INTERVAL)
 
 
+async def weekly_loop() -> None:
+    """Недельный отчёт. Проход каждую минуту, отправка — в понедельник утром.
+
+    Тот же приём, что и у сводки: час получателя, а не сервера, и номер недели
+    в ключе события. Повторные проходы внутри окна безопасны.
+    """
+    while True:
+        try:
+            await beat("worker:weekly")
+            if await acquire_lock("weekly:report", ttl_seconds=DIGEST_INTERVAL * 2):
+                try:
+                    async with session_scope() as session:
+                        # Выводы пишет ИИ; служба про него не знает, и отчёт
+                        # уходит таблицей, если выводов нет.
+                        sent = await weekly.send_reports(
+                            session, words=report_words.words
+                        )
+                    if sent:
+                        log.info("недельных отчётов поставлено: %s", sent)
+                finally:
+                    await release_lock("weekly:report")
+        except Exception as error:
+            log.exception("недельный отчёт: %s", error)
+            await record_error(error, source="worker:weekly")
+        await asyncio.sleep(DIGEST_INTERVAL)
+
+
 async def index_loop() -> None:
     """Извлечение текста из документов.
 
@@ -181,7 +210,7 @@ async def main() -> None:
     try:
         await asyncio.gather(
             delivery_loop(), deadline_loop(), meeting_loop(),
-            digest_loop(), index_loop(),
+            digest_loop(), weekly_loop(), index_loop(),
         )
     finally:
         from app.bot.loader import bot

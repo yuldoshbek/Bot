@@ -14,6 +14,7 @@
 3. Расход записан до ответа — иначе обрыв не учитывается и потолок обходится.
 4. Выключенный ИИ не ломает ничего — и это проверяется первым.
 """
+import ast
 import asyncio
 import json
 import re
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import delete, func, select
 
-from app.ai import gate, protocol, summary, voice
+from app.ai import gate, models, protocol, report as report_words, summary, voice
 from app.ai.local import Local, Mixed
 from app.ai.provider import Fake, ProviderError
 from app.core.config import settings
@@ -58,7 +59,7 @@ from app.models import (
     VoiceNote,
     WorkingHours,
 )
-from app.services import decisions, digest
+from app.services import decisions, digest, weekly
 from app.services import tasks as task_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
@@ -78,6 +79,11 @@ MORNING = datetime(2026, 9, 7, 2, 30, tzinfo=timezone.utc)
 
 passed = 0
 failed = 0
+
+
+def tokens_of(text: str) -> set[str]:
+    """Все числа в тексте. Сверка идёт по ним, а не по виду строки."""
+    return set(re.findall(r"\d+", text or ""))
 
 
 def check(condition: bool, title: str, detail: str = "") -> None:
@@ -203,6 +209,8 @@ async def main() -> None:
         await stage_digest(cast)
         await stage_protocol(cast)
         await stage_speech(cast)
+        await stage_weekly(cast)
+        stage_models()
     finally:
         settings.ai_enabled = was_enabled
         gate.use(Fake())
@@ -1445,9 +1453,468 @@ async def stage_speech(cast: Cast) -> None:
         gate.use(Fake())
         check(voice.max_seconds() == voice.MAX_SECONDS,
               "платной — меньше", str(voice.max_seconds()))
+
+        await _speech_cases(cast)
     finally:
         settings.stt_url = was_url
         settings.ai_enabled = True
+
+
+async def _speech_cases(cast: Cast) -> None:
+    """Что бывает со службой расшифровки на самом деле."""
+    from aiohttp import web
+
+    print("\n13.6. Служба отвечает по-разному — и ни один ответ не ломает бота")
+    seen: dict[str, object] = {}
+    reply: dict[str, object] = {}
+
+    async def stub(request: web.Request) -> web.Response:
+        form = await request.post()
+        seen["hint"] = form.get("hint", "")
+        seen["bytes"] = len(form["audio"].file.read()) if hasattr(form.get("audio"), "file") else 0
+        status = int(reply.get("status", 200))
+        if reply.get("garbage"):
+            return web.Response(status=status, text="это не json", content_type="text/plain")
+        return web.json_response(reply.get("body", {}), status=status)
+
+    server = web.Application()
+    server.router.add_post("/transcribe", stub)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 8898)
+    await site.start()
+    local = Local(url="http://127.0.0.1:8898/transcribe")
+    try:
+        # Служба упала.
+        reply.clear(); reply.update(status=500, body={})
+        failed = False
+        try:
+            await local.transcribe(b"12345", model="m")
+        except ProviderError as error:
+            failed = "500" in str(error)
+        check(failed, "ответ 500 — отказ с понятной причиной", str(failed))
+
+        # Служба ответила не по форме.
+        reply.clear(); reply.update(status=200, garbage=True)
+        broken = False
+        try:
+            await local.transcribe(b"12345", model="m")
+        except ProviderError:
+            broken = True
+        check(broken, "ответ не по форме — тоже отказ, а не падение")
+
+        # Подсказка о языке и лексике доходит до службы: без неё узбекские
+        # имена превращаются в случайные слова.
+        reply.clear()
+        reply.update(status=200, body={"text": "salom", "pieces": []})
+        await local.transcribe(b"0123456789", model="m", hint="проверка подсказки")
+        check(seen.get("hint") == "проверка подсказки", "подсказка дошла",
+              str(seen.get("hint")))
+        check(seen.get("bytes") == 10, "и звук дошёл целиком", str(seen.get("bytes")))
+
+        # Разметки по времени нет — текст всё равно оформляется, по предложениям.
+        reply.clear()
+        reply.update(status=200, body={
+            "text": "birinchi gap. ikkinchi gap. uchinchi gap. tortinchi gap.",
+            "pieces": [],
+        })
+        flat = await local.transcribe(b"1", model="m")
+        laid = speech.pretty(flat.text, flat.pieces)
+        check(not flat.pieces, "разметки нет", str(flat.pieces))
+        check("\n\n" in laid, "но абзацы всё равно есть", repr(laid))
+
+        # Пустой ответ — не успех: расшифровки нет, и говорить об этом надо прямо.
+        reply.clear()
+        reply.update(status=200, body={"text": "   ", "pieces": []})
+        gate.use(Mixed(voice=local, text=Fake()))
+        settings.stt_url = "http://127.0.0.1:8898/transcribe"
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            silent = await gate.transcribe(
+                session, b"1", organization_id=cast.org, user_id=chief.id
+            )
+        check(silent.reason == "empty", "пустая расшифровка успехом не считается",
+              silent.reason)
+
+        # Смешанная речь остаётся как есть: слова не переписываются.
+        mixed_said = "Karimovga aytdim, потом уточним смету. Ertaga qaytamiz."
+        reply.clear()
+        reply.update(status=200, body={
+            "text": mixed_said,
+            "model": "uz-small",
+            "seconds": 9.0,
+            "pieces": [[0.0, 3.0, "Karimovga aytdim, потом уточним смету."],
+                       [5.0, 7.0, "Ertaga qaytamiz."]],
+        })
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            note = await voice.remember(
+                session, user=chief, file_id="MIX", file_unique_id="uniq-mix",
+                duration_seconds=9, size_bytes=900,
+            )
+            written = await voice.write_down(session, note, b"1", user=chief)
+            mixed_id = note.id
+        check("Karimovga" in written and "уточним" in written,
+              "оба языка сохранены дословно", written[:80])
+        check("\n\n" in written, "и разведены по абзацам паузой", repr(written))
+
+        async with session_scope() as session:
+            saved = await session.get(VoiceNote, mixed_id)
+            check(saved.model == "uz-small", "в записи стоит модель, которой слушали",
+                  str(saved.model))
+
+        # Второе, другое голосовое — своя запись, а не подмена первой.
+        reply.clear()
+        reply.update(status=200, body={"text": "boshqa xabar", "pieces": []})
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            other = await voice.remember(
+                session, user=chief, file_id="OTHER", file_unique_id="uniq-other",
+                duration_seconds=3, size_bytes=300,
+            )
+            await voice.write_down(session, other, b"1", user=chief)
+            other_id = other.id
+        check(other_id != mixed_id, "запись отдельная", f"{mixed_id} / {other_id}")
+        async with session_scope() as session:
+            first = await session.get(VoiceNote, mixed_id)
+            second = await session.get(VoiceNote, other_id)
+        check(first.transcript != second.transcript,
+              "и расшифровки у них разные", second.transcript)
+
+        # Длинная речь без пауз не превращается в простыню: работает предел
+        # длины абзаца, а не пауза — человек может говорить без остановки.
+        long_pieces = [
+            [
+                float(i * 3), float(i * 3 + 2.6),
+                f"uzun gapning {chr(97 + i)} qismi va yana bir necha soʻz shu yerda",
+            ]
+            for i in range(20)
+        ]
+        reply.clear()
+        reply.update(status=200, body={
+            "text": " ".join(piece[2] for piece in long_pieces),
+            "pieces": long_pieces,
+        })
+        heard = await local.transcribe(b"1", model="m")
+        laid = speech.pretty(heard.text, heard.pieces)
+        gaps = {round(long_pieces[i + 1][0] - long_pieces[i][1], 1) for i in range(19)}
+        check(gaps == {0.4}, "паузы между отрезками короче порога", str(gaps))
+        check(laid.count("\n\n") >= 2,
+              "и всё равно разбито — по длине абзаца", str(laid.count("\n\n")))
+        check(max(len(block) for block in laid.split("\n\n")) < 600,
+              "ни один абзац не разросся",
+              str(max(len(block) for block in laid.split("\n\n"))))
+        check(len(heard.pieces) == 20, "и все отрезки разобраны",
+              str(len(heard.pieces)))
+    finally:
+        await runner.cleanup()
+
+
+async def _report_of(cast: Cast, *, words=None):
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        made = await weekly.build(session, viewer=chief, grants=grants, now=MORNING)
+        intro = await words(session, made, chief) if words else ""
+        return weekly.render(made, "ru", intro=intro or None), made, intro
+
+
+async def stage_weekly(cast: Cast) -> None:
+    print("\n14. Недельный отчёт: тренды поверх посчитанного")
+
+    print("\n14.1. Без ИИ уходит таблица показателей")
+    settings.ai_enabled = False
+    fake = Fake(answers=["не должно прозвучать"])
+    gate.use(fake)
+    plain, made, _ = await _report_of(cast)
+    with_ai, _, empty_intro = await _report_of(cast, words=report_words.words)
+    check(len(made.lines) == 15, "посчитаны все пятнадцать показателей",
+          str(len(made.lines)))
+    check(not made.empty, "и отчёт не пуст")
+    check(fake.calls == 0, "модель не звали", str(fake.calls))
+    check(empty_intro == "", "вступления нет", repr(empty_intro))
+    check(with_ai == plain, "письмо не изменилось ни на знак")
+
+    # Утверждение о самой отрисовке, а не сравнение двух её вызовов.
+    check("\n\n\n" not in plain, "без вступления лишнего пустого места нет")
+    check(weekly.render(made, "ru", intro="") == plain, "пустое вступление ничего не добавляет")
+    check("ПРОБА" in weekly.render(made, "ru", intro="ПРОБА"), "написанное — ставится")
+
+    print("\n14.2. Сравнение — с прошлой неделей, а не с самим собой")
+    # Утверждение о самих границах: сравнение периода с собой дало бы ровный
+    # тренд по всем показателям и выглядело бы как «ничего не изменилось».
+    check(made.before_until == made.since,
+          "прошлый период кончается там, где начинается нынешний",
+          f"{made.before_until} / {made.since}")
+    check(made.until - made.since == made.before_until - made.before_since,
+          "и длится столько же",
+          f"{made.until - made.since} / {made.before_until - made.before_since}")
+    check(made.before_until <= made.since, "периоды не перекрываются")
+
+    print("\n14.3. Прогноз не сравнивается с прошлой неделей")
+    forecast = [line for line in made.lines if line.key == weekly.FORECAST_KEY]
+    check(forecast and forecast[0].before is None,
+          "у прогноза нет прошлого значения", str(bool(forecast)))
+    check(forecast and forecast[0].moved == "", "и стрелки у него нет",
+          str(forecast[0].moved if forecast else "?"))
+    movable = [line for line in made.lines if line.key != weekly.FORECAST_KEY]
+    check(all(line.moved in ("", "↑", "↓", "→") for line in movable),
+          "движение обозначено фактом, а не оценкой",
+          str({line.moved for line in movable}))
+
+    print("\n14.4. Метки берутся с того же отчёта")
+    values = report_words.facts(made)
+    check(values, "метки собраны", str(len(values)))
+    for line in made.lines:
+        if line.now.value is None:
+            check(line.key not in values, f"молчащий показатель {line.key} не в метках")
+        else:
+            check(values.get(line.key) == line.now.shown(),
+                  f"значение {line.key} взято с отчёта", str(values.get(line.key)))
+    for line in made.lines:
+        if line.before is not None and line.before.value is not None:
+            check(values.get(f"{line.key}_was") == line.before.shown(),
+                  f"прошлое значение {line.key} — тоже метка",
+                  str(values.get(f"{line.key}_was")))
+
+    print("\n14.5. Ни одного числа, которого никто не считал")
+    settings.ai_enabled = True
+    key = next(iter(values))
+    good = "\n".join([
+        f"Asosiy oʻzgarish — {{{key}}} koʻrsatkichida.",
+        "Bu haftada shu yoʻnalishga qarash kerak.",
+        "Qolgan koʻrsatkichlar sezilarli oʻzgarmadi.",
+        "Xulosa: diqqatni bitta joyga qaratish.",
+    ])
+    gate.use(Fake(answers=[good]))
+    worded, again, intro = await _report_of(cast, words=report_words.words)
+    check(intro, "выводы написаны", intro[:60])
+    check("{" not in intro, "метка в письме не осталась", intro[:80])
+    seen = tokens_of(intro)
+    allowed = {found for value in values.values() for found in tokens_of(value)}
+    check(seen, "и числа в них есть", str(seen))
+    check(seen <= allowed, "каждое число — из посчитанных", str(seen - allowed))
+    body = plain.split("\n", 2)[2]
+    check(worded.endswith(body), "таблица показателей осталась нетронутой")
+
+    print("\n14.6. Негодный ответ письма не портит")
+    for name, answer in (
+        ("цифра от модели", "Bu hafta 7 ta muammo.\nIkkinchi.\nUchinchi."),
+        ("выдуманная метка", "Koʻrsatkich {vydumka} oshdi.\nIkkinchi.\nUchinchi."),
+        ("одна строка", "Hammasi yaxshi."),
+        ("пустой ответ", "  "),
+    ):
+        gate.use(Fake(answers=[answer]))
+        got, _, _ = await _report_of(cast, words=report_words.words)
+        check(got == plain, f"{name}: ушла обычная таблица", got[:60])
+
+    print("\n14.7. Старшая модель — только здесь")
+    gate.use(Fake(answers=[good]))
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        built = await weekly.build(session, viewer=chief, grants=grants, now=MORNING)
+        await report_words.words(session, built, chief)
+        last = (await session.execute(
+            select(AiCall).where(
+                AiCall.organization_id == cast.org,
+                AiCall.kind == "weekly_report",
+            ).order_by(AiCall.id.desc()).limit(1)
+        )).scalar_one_or_none()
+    check(last is not None, "вызов записан в журнал")
+    check(last.model == settings.ai_model_report, "старшей моделью", str(last.model))
+    check(last.prompt_version == report_words.PROMPT_VERSION, "и с версией промпта",
+          str(last.prompt_version))
+
+    # Проверка по исходнику: имя старшей модели не должно встречаться нигде,
+    # кроме настроек и этого сценария. Иначе «только здесь» — просто слова.
+    root = Path(__file__).resolve().parents[1] / "app"
+    users = sorted(
+        str(path.relative_to(root.parent))
+        for path in root.rglob("*.py")
+        if "ai_model_report" in path.read_text(encoding="utf-8")
+    )
+    check(users == ["app/ai/models.py", "app/core/config.py"],
+          "имя старшей модели берётся ровно в одном месте", str(users))
+    check(models.name_for("weekly_report") == settings.ai_model_report,
+          "и справочник отдаёт именно её", models.name_for("weekly_report"))
+
+    print("\n14.8. Кириллица выводится правилом")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        chief.locale = "uz-Cyrl"
+    gate.use(Fake(answers=[good]))
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        built = await weekly.build(session, viewer=chief, grants=grants, now=MORNING)
+        cyrillic = await report_words.words(session, built, chief)
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        chief.locale = "uz"
+    check("koʻrsatkichida" not in cyrillic, "латиница не осталась", cyrillic[:80])
+    check("кўрсаткичида" in cyrillic, "строка переведена правилом", cyrillic[:80])
+
+    print("\n14.9. Раз в неделю, в понедельник утром")
+    monday = datetime(2026, 9, 7, 3, 0, tzinfo=timezone.utc)   # 08:00 в Ташкенте
+    check(weekly.due_now(monday, "Asia/Tashkent"), "в понедельник в 08:00 пора")
+    check(not weekly.due_now(monday - timedelta(hours=1), "Asia/Tashkent"),
+          "в 07:00 ещё рано")
+    check(not weekly.due_now(monday + timedelta(days=1), "Asia/Tashkent"),
+          "во вторник уже не время")
+    check(weekly.week_key(monday, "Asia/Tashkent") !=
+          weekly.week_key(monday + timedelta(days=7), "Asia/Tashkent"),
+          "ключ недели меняется через неделю")
+    check(weekly.week_key(monday, "Asia/Tashkent") ==
+          weekly.week_key(monday + timedelta(days=3), "Asia/Tashkent"),
+          "и не меняется внутри недели")
+
+    gate.use(Fake(answers=[good, good, good]))
+    async with session_scope() as session:
+        sent = await weekly.send_reports(session, monday, words=report_words.words)
+    check(sent >= 1, "отчёт поставлен в очередь", str(sent))
+    async with session_scope() as session:
+        twice = await weekly.send_reports(
+            session, monday + timedelta(minutes=5), words=report_words.words
+        )
+    check(twice == 0, "второй проход в ту же неделю ничего не добавляет", str(twice))
+
+    # А через неделю — добавляет. Без номера недели в ключе письмо ушло бы
+    # ровно один раз за всю жизнь системы, и заметили бы это через месяц.
+    gate.use(Fake(answers=[good, good, good]))
+    async with session_scope() as session:
+        later = await weekly.send_reports(
+            session, monday + timedelta(days=7), words=report_words.words
+        )
+    check(later >= 1, "через неделю отчёт уходит снова", str(later))
+
+    async with session_scope() as session:
+        letter = await session.scalar(
+            select(Notification.body).where(
+                Notification.user_id == cast.chief,
+                Notification.kind == "report.weekly",
+            )
+        )
+    check(letter, "письмо собрано", (letter or "")[:40])
+    check("📈" in (letter or ""), "и это недельный отчёт", (letter or "")[:40])
+
+
+def _kinds_in_source() -> set[str]:
+    """Виды вызовов, которые где-либо передаются в дверь к модели.
+
+    Разбор по дереву, а не поиском строк: `kind=` встречается и у уведомлений,
+    и совпадение по подстроке нашло бы их тоже.
+    """
+    root = Path(__file__).resolve().parents[1] / "app"
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr not in ("ask", "transcribe"):
+                continue
+            if not isinstance(func.value, ast.Name) or func.value.id != "gate":
+                continue
+            for word in node.keywords:
+                if word.arg == "kind" and isinstance(word.value, ast.Constant):
+                    found.add(str(word.value.value))
+    # Расшифровка вида в аргументах не передаёт — она называет его сама,
+    # когда спрашивает у справочника модель. Собираем и такие обращения.
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "name_for"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                found.add(str(node.args[0].value))
+    return found
+
+
+def stage_models() -> None:
+    print("\n15. Модели согласованы между собой")
+
+    print("\n15.1. Сценарий не знает имён моделей")
+    # Имя модели выбирается по виду вызова. Написанное в сценарии имя однажды
+    # поправят в одном месте и забудут в трёх.
+    root = Path(__file__).resolve().parents[1] / "app"
+    named = sorted(
+        str(path.relative_to(root.parent))
+        for path in root.rglob("*.py")
+        for text in [path.read_text(encoding="utf-8")]
+        if "gpt-4o" in text or "whisper-1" in text
+    )
+    check(named == ["app/core/config.py"],
+          "имена моделей встречаются только в настройках", str(named))
+
+    print("\n15.2. Каждый вид вызова объявлен")
+    used = _kinds_in_source()
+    check(used, "виды вызовов найдены в исходнике", str(sorted(used)))
+    unknown = sorted(used - set(models.KINDS))
+    check(not unknown, "и каждый есть в справочнике", str(unknown))
+    # Обратное тоже важно: объявленный, но никем не используемый вид — это
+    # либо забытый сценарий, либо опечатка в имени.
+    # «ask» объявлен заранее — под вопрос своими словами, фазу 6.
+    idle = sorted(set(models.KINDS) - used - {"ask"})
+    check(not idle, "и каждый объявленный используется", str(idle))
+
+    print("\n15.3. Роль решает, какой моделью")
+    check(models.name_for("digest") == settings.ai_model_routine,
+          "сводка идёт рутинной", models.name_for("digest"))
+    check(models.name_for("protocol") == settings.ai_model_routine,
+          "протокол тоже", models.name_for("protocol"))
+    check(models.name_for("voice_task") == settings.ai_model_routine,
+          "и голосовое поручение", models.name_for("voice_task"))
+    check(models.name_for("weekly_report") == settings.ai_model_report,
+          "недельный отчёт — старшей", models.name_for("weekly_report"))
+    check(models.name_for("voice_transcribe") == settings.ai_model_voice,
+          "расшифровка — своей", models.name_for("voice_transcribe"))
+    # Незнакомый вид не должен молча уйти на старшую модель: она в двадцать
+    # раз дороже, и заметили бы это только по счёту.
+    check(models.role_of("выдуманный_вид") == "routine",
+          "неизвестный вид идёт рутинной, а не старшей",
+          models.role_of("выдуманный_вид"))
+    check(set(models.KINDS.values()) <= set(models.ROLES),
+          "все роли из объявленного перечня", str(set(models.KINDS.values())))
+
+    print("\n15.4. Список моделей расшифровки — общий со службой")
+    shared = models.speech_models()
+    check(shared, "список прочитан", str(len(shared)))
+    check(models.CATALOGUE_PATH.name == "models.json",
+          "и лежит в общем файле", models.CATALOGUE_PATH.name)
+    service = (models.CATALOGUE_PATH.parent / "app.py").read_text(encoding="utf-8")
+    check("models.json" in service,
+          "служба расшифровки читает тот же файл, а не свою копию")
+    check(models.CATALOGUE_PATH.exists(), "файл на месте",
+          str(models.CATALOGUE_PATH))
+
+    for alias, item in shared.items():
+        check(item.repo and item.languages and item.note,
+              f"у модели {alias} заполнены имя, языки и пояснение",
+              f"{item.repo}/{item.languages}")
+
+    print("\n15.5. Узбекские модели подключены")
+    uzbek = {item.alias: item for item in models.for_uzbek()}
+    check(set(uzbek) == {"uz-small", "uz-medium"},
+          "обе узбекские модели в списке", str(sorted(uzbek)))
+    check(uzbek["uz-small"].repo == "OvozifyLabs/whisper-small-uz-v1",
+          "uz-small — сбалансированная по трём языкам", uzbek["uz-small"].repo)
+    check(uzbek["uz-medium"].repo == "islomov/rubaistt_v2_medium",
+          "uz-medium — ташкентский говор", uzbek["uz-medium"].repo)
+    check(all(item.convert for item in uzbek.values()),
+          "обе требуют перевода в CTranslate2 — и служба делает его сама")
+    check("ct2-transformers-converter" in service,
+          "перевод встроен в службу, а не оставлен человеку")
+    check(all("uz" in item.languages for item in uzbek.values()),
+          "и обе объявлены узбекскими")
+    # Базовые модели узбекскими не считаются: иначе выбор «uz» вернул бы
+    # ту, что узбекского почти не знает.
+    check("small" not in uzbek, "базовая small в узбекские не попала")
 
 
 if __name__ == "__main__":

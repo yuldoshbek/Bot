@@ -44,6 +44,7 @@ SERVICES = {
     "worker:deadlines": "Контроль сроков",
     "worker:meetings": "Уход за встречами",
     "worker:digest": "Утренняя сводка",
+    "worker:weekly": "Недельный отчёт",
     "worker:documents": "Разбор документов",
 }
 

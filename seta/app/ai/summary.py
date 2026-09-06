@@ -4,20 +4,9 @@
 несколько строк о том, с чего начать день. Выключенный ИИ убирает эти строки
 и не трогает больше ничего — письмо уходит слово в слово прежнее.
 
-**Ни одной цифры от модели.** Числа модель не пишет вовсе: она расставляет
-метки вида `{overdue}`, а значения подставляет код — из того же экрана,
-который человек увидит следом. Ответ, в котором есть цифра, отвергается
-целиком, и уходит обычная сводка.
-
-Почему так, а не «попросим не врать»: пересказанное моделью число нельзя
-проверить, не сверив его с посчитанным, а сверять числа в свободном тексте —
-занятие безнадёжное. Метка снимает вопрос: подставляет код, значит совпадает
-по построению.
-
-**Остаточный риск назван честно.** Правило ловит цифры, а не числа словами:
-«три просрочки» отличить от «в три раза» в трёх языках нельзя, а отвергать
-всё подряд — значит выключить функцию. Промпт просит не писать чисел словами;
-гарантия же даётся только про цифры.
+**Ни одной цифры от модели.** Числа она не пишет вовсе: расставляет метки,
+значения подставляет код. Само правило — общее для всех сценариев и живёт
+в `app/ai/tokens.py`; здесь только границы вступления и список меток.
 
 **Кириллица выводится правилом.** Модель пишет по-узбекски латиницей, а
 письменность меняет тот же `to_cyrillic`, что и весь остальной интерфейс.
@@ -29,14 +18,12 @@
 денег ради строк, которые человек уже прочитал утром.
 """
 import logging
-import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai import gate
+from app.ai import gate, tokens
 from app.ai.prompts import MORNING_DIGEST
 from app.core.i18n import DERIVED_LOCALE, normalize
-from app.core.text import esc
 from app.core.timeutil import to_local
 from app.core.translit import to_cyrillic
 from app.models.user import User
@@ -45,9 +32,6 @@ from app.services.dashboard import Board
 log = logging.getLogger("seta.ai.summary")
 
 PROMPT_VERSION = MORNING_DIGEST.version
-
-TOKEN = re.compile(r"\{([a-z_]{1,24})\}")
-DIGIT = re.compile(r"\d")
 
 # Границы годного вступления. Меньше четырёх строк — это не акценты, а подпись;
 # больше семи — второй экран поверх первого, и его перестанут читать.
@@ -132,44 +116,16 @@ def ask_text(values: dict[str, str], locale: str | None) -> str:
 
 
 def usable(raw: str, values: dict[str, str]) -> str | None:
-    """Годен ли ответ. None — не годен, и уходит обычная сводка.
-
-    Отвергается целиком, а не чинится по кусочкам: ответ, в котором модель
-    нарушила правило, нечем отличить от ответа, в котором она нарушила два.
-    """
-    text = (raw or "").strip()
-    if not text:
-        return None
-    if DIGIT.search(text):
-        # Цифру принесла модель — значит, это число, которое никто не считал.
-        return None
-    if any(token not in values for token in TOKEN.findall(text)):
-        # Метка не из списка: либо выдумана, либо про то, чего сегодня нет.
-        return None
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not MIN_LINES <= len(lines) <= MAX_LINES:
-        return None
-    if sum(len(line) for line in lines) > MAX_CHARS:
-        return None
-    return "\n".join(lines)
+    """Границы вступления. Само правило — общее, в `app/ai/tokens.py`."""
+    return tokens.usable(
+        raw, values,
+        min_lines=MIN_LINES, max_lines=MAX_LINES, max_chars=MAX_CHARS,
+    )
 
 
 def fill(text: str, values: dict[str, str]) -> str:
-    """Подставляет значения. Вызывается только после `usable`.
-
-    Полнота списка меток — её забота: здесь неизвестная метка означает
-    сломанный порядок вызовов, и падать в этом случае честнее, чем молча
-    подставить пустоту. Цикл сводки такое падение переживает — у него свой
-    перехват, — а оператору оно видно на странице состояния.
-
-    Экранирование раньше подстановки — намеренно.
-
-    Текст пишет модель, а название отдела — человек; в сообщение с разметкой
-    оба попадают экранированными. Метки при экранировании не страдают:
-    фигурные скобки для HTML — обычные знаки.
-    """
-    return TOKEN.sub(lambda found: esc(values[found.group(1)]), esc(text))
+    """Подстановка значений — тем же правилом, что и во всех сценариях."""
+    return tokens.fill(text, values)
 
 
 async def accents(session: AsyncSession, board: Board, viewer: User) -> str:

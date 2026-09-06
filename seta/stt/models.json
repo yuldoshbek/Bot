@@ -1,0 +1,40 @@
+{
+  "_note": "Единственный список моделей расшифровки. Читают его двое: сама служба (stt/app.py) и бот (app/ai/models.py). Копий нет намеренно — разошлись бы они молча, и бот показывал бы в журнале одну модель, а слушала бы другая.",
+  "models": {
+    "small": {
+      "repo": "small",
+      "convert": false,
+      "ram_mb": 1000,
+      "languages": "ru, en",
+      "note": "Базовый Whisper. Русский хорошо, узбекский слабо. С него начинают"
+    },
+    "medium": {
+      "repo": "medium",
+      "convert": false,
+      "ram_mb": 2500,
+      "languages": "ru, en",
+      "note": "Базовый, заметно лучше, но втрое медленнее на процессоре"
+    },
+    "large-v3": {
+      "repo": "large-v3",
+      "convert": false,
+      "ram_mb": 4000,
+      "languages": "ru, en",
+      "note": "Лучший базовый. На процессоре без видеокарты медленно"
+    },
+    "uz-small": {
+      "repo": "OvozifyLabs/whisper-small-uz-v1",
+      "convert": true,
+      "ram_mb": 1000,
+      "languages": "uz, ru, en",
+      "note": "Узбекский, русский и английский сбалансированно. Ближе всего к тому, как говорят в кабинете: речь смешанная"
+    },
+    "uz-medium": {
+      "repo": "islomov/rubaistt_v2_medium",
+      "convert": true,
+      "ram_mb": 2500,
+      "languages": "uz, ru",
+      "note": "Узбекский с отдельным вниманием к ташкентскому говору. Тяжелее, но на местной речи точнее"
+    }
+  }
+}
