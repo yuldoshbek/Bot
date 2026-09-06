@@ -353,6 +353,17 @@ async def with_database() -> None:
                 # Только по organization_id: чужие записи не трогаем никогда.
                 from app.models.task import Task as TaskRow
 
+                from app.models.notification import Notification as Letter
+                from app.models.task import TaskEvent
+
+                await session.execute(delete(TaskEvent).where(
+                    TaskEvent.task_id.in_(
+                        select(TaskRow.id).where(TaskRow.organization_id.in_(org_ids))
+                    )
+                ))
+                await session.execute(
+                    delete(Letter).where(Letter.organization_id.in_(org_ids))
+                )
                 await session.execute(
                     delete(TaskRow).where(TaskRow.organization_id.in_(org_ids))
                 )
@@ -541,12 +552,29 @@ async def with_database() -> None:
         "app/bot/middlewares/auth.py",
         "app/services/dashboard.py",
         "app/services/digest.py",
+        "app/services/tasks.py",
+        "app/services/deadlines.py",
+        "app/services/decisions.py",
+        "app/services/quotas.py",
+        "app/services/availability.py",
+        "app/services/attendance.py",
     ]
-    # Что остаётся по-русски намеренно и почему.
+    # Что остаётся по-русски намеренно — и почему. Список именно строк,
+    # а не файлов: иначе исключение для одной подписи закрыло бы весь файл,
+    # и следующая забытая строка прошла бы незамеченной.
     ALLOWED = {
-        # Подписи для выгрузок и журнала: файл открывают вне бота, и язык
+        # Подписи для выгрузок: файл открывают в Excel вне бота, и язык
         # получателя там неизвестен.
-        "app/services/availability.py": {"STATE_LABELS"},
+        "🔵 Новое", "🔵 Принято", "🟡 В работе", "🟠 На проверке",
+        "🟢 Выполнено", "🟠 Заблокировано", "🔴 Просрочено", "⚫ Отменено",
+        "Низкий", "Обычный", "🔴 Высокий", "🔴 Критичный",
+        "В работе", "Выполнено", "Отменено",
+        "Доступен для приёма", "Занят", "Не беспокоить", "Индикатор не выставлен",
+        "Полезная", "Нейтральная", "Бесполезная",
+        "на неделю", "на месяц",
+        # Записи в журнале действий: их читает администратор в разделе аудита,
+        # а не участник события.
+        "эскалация: ", "файл",
     }
 
     for module in DONE_MODULES:
@@ -563,6 +591,7 @@ async def with_database() -> None:
             node.value for node in ast.walk(tree)
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
             and node.value not in docstrings
+            and node.value not in ALLOWED
             and re.search(r"[А-Яа-яЁё]", node.value)
         })
         check(not russian, f"{module.split('/')[-1]}: русских строк нет",
@@ -598,6 +627,79 @@ async def with_database() -> None:
           screens["uz"][-60:])
     check(UZ["dashboard.no_department"] in screens["uz"],
           "строка без отдела подписана на своём языке", screens["uz"][-90:])
+
+    print("\n20. Уведомление приходит на языке получателя, а не отправителя")
+    # Самое незаметное место перевода. Уведомление собирает тот, кто совершил
+    # действие, а читает совсем другой человек — и языки у них разные. Ошибку
+    # такого рода видит только получатель, и пожаловаться ему некому: сообщение
+    # выглядит просто «не на том языке», а не сломанным.
+    from app.models.notification import Notification
+    from app.services import tasks as task_service
+
+    async with session_scope() as session:
+        org = Organization(name=ORG, timezone="Asia/Tashkent")
+        session.add(org)
+        await session.flush()
+        # Начальник говорит по-русски, исполнитель — по-узбекски.
+        chief = User(organization_id=org.id, telegram_user_id=999_000_444,
+                     full_name="ТЕСТ Начальник", status=UserStatus.ACTIVE,
+                     timezone="Asia/Tashkent", locale="ru")
+        worker = User(organization_id=org.id, telegram_user_id=999_000_555,
+                      full_name="ТЕСТ Ishchi", status=UserStatus.ACTIVE,
+                      timezone="Asia/Tashkent", locale="uz")
+        session.add_all([chief, worker])
+        await session.flush()
+
+        made = await task_service.create_task(
+            session, creator=chief, assignee=worker,
+            title="TEST topshiriq", priority=Priority.CRITICAL,
+        )
+        letter = await session.scalar(
+            select(Notification.body).where(
+                Notification.user_id == worker.id,
+                Notification.event_key == f"task:{made.id}:assigned",
+            )
+        )
+        check(letter is not None, "исполнителю ушло письмо о поручении")
+        check(UZ["task.notify.new"] in (letter or ""),
+              "письмо на узбекском — языке исполнителя, а не автора",
+              (letter or "")[:70])
+        check(RU["task.notify.new"] not in (letter or ""),
+              "и русского заголовка в нём нет", (letter or "")[:70])
+        strays = sorted(set(re.findall(r"[А-Яа-яЁё]+", letter or "")))
+        # Имя автора остаётся кириллицей — это данные, а не язык интерфейса.
+        strays = [w for w in strays if w not in ("ТЕСТ", "Начальник")]
+        check(not strays, "и ни одного русского слова интерфейса", str(strays[:5]))
+
+        # Обратная сторона: автору о принятии приходит по-русски.
+        await task_service.accept(session, made, worker)
+        back = await session.scalar(
+            select(Notification.body).where(
+                Notification.user_id == chief.id,
+                Notification.event_key == f"task:{made.id}:accepted",
+            )
+        )
+        check(back is not None, "автору ушло письмо о принятии")
+        check("принял поручение" in (back or ""),
+              "и оно по-русски — на языке автора", (back or "")[:70])
+
+        # А теперь письмо, которое собирает русскоязычный, а читает узбек —
+        # и идёт оно через `_notify`, а не через прямую постановку в очередь.
+        # Без этого случая подменённый в `_notify` язык выглядел бы верным:
+        # предыдущее письмо и так уходило по-русски.
+        await task_service.start(session, made, worker)
+        await task_service.submit(session, made, worker)
+        await task_service.approve(session, made, chief)
+        praise = await session.scalar(
+            select(Notification.body).where(
+                Notification.user_id == worker.id,
+                Notification.kind == "task.approved",
+            )
+        )
+        check(praise is not None, "исполнителю ушло письмо о приёмке работы")
+        check(UZ["task.notify.approved"] in (praise or ""),
+              "и оно по-узбекски, хотя принимал русскоязычный",
+              (praise or "")[:70])
 
     await cleanup()
     async with session_scope() as session:

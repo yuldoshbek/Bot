@@ -10,6 +10,7 @@
 
 Дополнительно: BLOCKED, OVERDUE, CANCELLED.
 """
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -211,7 +212,7 @@ async def create_task(
     decision_id: int | None = None,
 ) -> Task:
     if not title.strip():
-        raise TaskError("У поручения должно быть название.")
+        raise TaskError(t("task.err.no_title", creator.locale))
 
     needs_review = (
         default_requires_review(priority) if requires_review is None else requires_review
@@ -258,13 +259,21 @@ async def create_task(
         },
     )
 
+    # Язык исполнителя, а не создателя: письмо читает он.
+    lang = assignee.locale
     author = esc(creator.full_name)
     if on_behalf_of_id:
         principal = await session.get(User, on_behalf_of_id)
         if principal:
-            author = f"{esc(creator.full_name)} по поручению: {esc(principal.full_name)}"
+            author = (
+                f"{esc(creator.full_name)}{t('task.card.by_task', lang)}"
+                f"{esc(principal.full_name)}"
+            )
 
-    due_line = f"\n⏰ Срок: {humanize_due(due_at, assignee.timezone, assignee.locale)}" if due_at else ""
+    due_line = (
+        f"\n⏰ {t('task.field.due', lang)}: "
+        f"{humanize_due(due_at, assignee.timezone, lang)}" if due_at else ""
+    )
     await enqueue(
         session,
         user_id=assignee.id,
@@ -277,10 +286,10 @@ async def create_task(
             else NotificationPriority.NORMAL
         ),
         body=(
-            f"📋 <b>Новое поручение</b>\n\n"
+            f"{t('task.notify.new', lang)}\n\n"
             f"{esc(task.title)}{due_line}\n"
-            f"🔺 Приоритет: {PRIORITY_LABELS[Priority(priority)]}\n"
-            f"👤 От: {author}"
+            f"🔺 {t('task.field.priority', lang)}: {priority_title(priority, lang)}\n"
+            f"👤 {t('task.notify.from', lang)}: {author}"
         ),
         payload={"task_id": task.id},
         timezone_name=assignee.timezone,
@@ -373,7 +382,7 @@ async def access_for(
 
 # ── Переходы ────────────────────────────────────────────────────────────────
 async def accept(session: AsyncSession, task: Task, actor: User) -> None:
-    _require(task.status == TaskStatus.NEW, "Поручение уже принято.")
+    _require(task.status == TaskStatus.NEW, t("task.err.already_accepted", actor.locale))
     before = task.status
     task.status = TaskStatus.ACKNOWLEDGED
     task.accepted_at = utcnow()
@@ -382,7 +391,8 @@ async def accept(session: AsyncSession, task: Task, actor: User) -> None:
     await _notify(
         session, task.creator_id,
         f"task:{task.id}:accepted", "task.accepted", NotificationPriority.LOW,
-        f"✅ {esc(actor.full_name)} принял поручение: {esc(task.title)}",
+        lambda lang: "✅ " + t("task.notify.accepted", lang,
+                              name=esc(actor.full_name), title=esc(task.title)),
         task.id,
     )
 
@@ -390,7 +400,7 @@ async def accept(session: AsyncSession, task: Task, actor: User) -> None:
 async def start(session: AsyncSession, task: Task, actor: User) -> None:
     _require(
         task.status in (TaskStatus.NEW, TaskStatus.ACKNOWLEDGED, TaskStatus.BLOCKED),
-        "Поручение уже в работе.",
+        t("task.err.already_working", actor.locale),
     )
     before = task.status
     task.status = TaskStatus.IN_PROGRESS
@@ -410,7 +420,7 @@ async def submit(
             TaskStatus.ACKNOWLEDGED, TaskStatus.IN_PROGRESS,
             TaskStatus.OVERDUE, TaskStatus.BLOCKED,
         ),
-        "Отчитаться по этому поручению сейчас нельзя.",
+        t("task.err.cannot_submit", actor.locale),
     )
     before = task.status
     task.submitted_at = utcnow()
@@ -423,9 +433,11 @@ async def submit(
             session, task.reviewer_id,
             f"task:{task.id}:review:{task.rework_count}", "task.review_required",
             NotificationPriority.NORMAL,
-            f"🟠 <b>Требуется проверка</b>\n\n{esc(task.title)}\n"
-            f"👤 Исполнитель: {esc(actor.full_name)}"
-            + (f"\n💬 {esc(comment)}" if comment else ""),
+            lambda lang: (
+                f"{t('task.notify.review_needed', lang)}\n\n{esc(task.title)}\n"
+                f"👤 {t('task.field.assignee', lang)}: {esc(actor.full_name)}"
+                + (f"\n💬 {esc(comment)}" if comment else "")
+            ),
             task.id,
         )
         return TaskStatus.REVIEW
@@ -437,8 +449,11 @@ async def submit(
     await _notify(
         session, task.creator_id,
         f"task:{task.id}:done", "task.done", NotificationPriority.NORMAL,
-        f"🟢 <b>Поручение выполнено</b>\n\n{esc(task.title)}\n👤 {esc(actor.full_name)}"
-        + (f"\n💬 {esc(comment)}" if comment else ""),
+        lambda lang: (
+            f"{t('task.notify.done', lang)}\n\n{esc(task.title)}\n"
+            f"👤 {esc(actor.full_name)}"
+            + (f"\n💬 {esc(comment)}" if comment else "")
+        ),
         task.id,
     )
     return TaskStatus.DONE
@@ -447,7 +462,7 @@ async def submit(
 async def approve(
     session: AsyncSession, task: Task, actor: User, comment: str | None = None
 ) -> None:
-    _require(task.status == TaskStatus.REVIEW, "Поручение не находится на проверке.")
+    _require(task.status == TaskStatus.REVIEW, t("task.err.not_in_review", actor.locale))
     before = task.status
     task.status = TaskStatus.DONE
     task.completed_at = utcnow()
@@ -461,7 +476,10 @@ async def approve(
         session, task.assignee_id,
         f"task:{task.id}:approved:{task.rework_count}", "task.approved",
         NotificationPriority.NORMAL,
-        f"🟢 <b>Работа принята</b>\n\n{esc(task.title)}" + (f"\n💬 {esc(comment)}" if comment else ""),
+        lambda lang: (
+            f"{t('task.notify.approved', lang)}\n\n{esc(task.title)}"
+            + (f"\n💬 {esc(comment)}" if comment else "")
+        ),
         task.id,
     )
 
@@ -470,9 +488,9 @@ async def return_for_rework(
     session: AsyncSession, task: Task, actor: User, comment: str
 ) -> None:
     """Возврат на доработку. Комментарий обязателен: «переделай» без причины бесполезно."""
-    _require(task.status == TaskStatus.REVIEW, "Поручение не находится на проверке.")
+    _require(task.status == TaskStatus.REVIEW, t("task.err.not_in_review", actor.locale))
     if not comment.strip():
-        raise TaskError("Напишите, что именно нужно доработать.")
+        raise TaskError(t("task.err.need_rework_note", actor.locale))
 
     before = task.status
     task.status = TaskStatus.IN_PROGRESS
@@ -484,7 +502,9 @@ async def return_for_rework(
         session, task.assignee_id,
         f"task:{task.id}:returned:{task.rework_count}", "task.returned",
         NotificationPriority.NORMAL,
-        f"🟠 <b>Возвращено на доработку</b>\n\n{esc(task.title)}\n💬 {esc(comment)}",
+        lambda lang: (
+            f"{t('task.notify.returned', lang)}\n\n{esc(task.title)}\n💬 {esc(comment)}"
+        ),
         task.id,
     )
 
@@ -510,7 +530,7 @@ async def mark_overdue(session: AsyncSession, task: Task) -> None:
 async def cancel(session: AsyncSession, task: Task, actor: User, reason: str | None = None) -> None:
     _require(
         task.status not in (TaskStatus.DONE, TaskStatus.CANCELLED),
-        "Поручение уже закрыто.",
+        t("task.err.already_closed", actor.locale),
     )
     before = task.status
     task.status = TaskStatus.CANCELLED
@@ -524,7 +544,10 @@ async def cancel(session: AsyncSession, task: Task, actor: User, reason: str | N
     await _notify(
         session, task.assignee_id,
         f"task:{task.id}:cancelled", "task.cancelled", NotificationPriority.NORMAL,
-        f"⚫ <b>Поручение отменено</b>\n\n{esc(task.title)}" + (f"\n💬 {esc(reason)}" if reason else ""),
+        lambda lang: (
+            f"{t('task.notify.cancelled', lang)}\n\n{esc(task.title)}"
+            + (f"\n💬 {esc(reason)}" if reason else "")
+        ),
         task.id,
     )
 
@@ -534,15 +557,15 @@ async def request_extension(
     session: AsyncSession, task: Task, actor: User, new_due_at: datetime, reason: str
 ) -> TaskExtension:
     if not reason.strip():
-        raise TaskError("Укажите причину переноса срока.")
+        raise TaskError(t("task.err.need_extend_reason", actor.locale))
     if task.due_at and new_due_at <= task.due_at:
-        raise TaskError("Новый срок должен быть позже текущего.")
+        raise TaskError(t("task.err.due_not_later", actor.locale))
 
     # Один открытый запрос на поручение. Иначе десять нажатий кнопки дают автору
     # десять одинаковых карточек, и непонятно, какую из них он решает.
     if await pending_extension(session, task.id) is not None:
         raise TaskError(
-            "Запрос на перенос уже отправлен — ждём решения автора поручения."
+            t("task.err.extension_pending", actor.locale)
         )
 
     extension = TaskExtension(
@@ -561,17 +584,22 @@ async def request_extension(
     # Получатель нужен до сборки текста, а не после: срок показывается в его
     # часовом поясе и на его языке. `_notify` находит его сам, но уже поздно —
     # текст к тому моменту собран, и человек в другом поясе видел бы чужой час.
+    # Часовой пояс всё ещё нужен здесь: `_notify` подставляет язык, но срок
+    # форматируется внутри текста, а пояс получателя известен только тут.
     decider = await session.get(User, decider_id) if decider_id else None
     zone = decider.timezone if decider else None
-    speech = decider.locale if decider else None
     await _notify(
         session, decider_id,
         f"task:{task.id}:ext:{extension.id}", "task.extension_requested",
         NotificationPriority.NORMAL,
-        f"⏰ <b>Просят перенести срок</b>\n\n{esc(task.title)}\n"
-        f"👤 {esc(actor.full_name)}\n"
-        f"Было: {humanize_due(task.due_at, zone, speech) if task.due_at else 'без срока'}\n"
-        f"Станет: {humanize_due(new_due_at, zone, speech)}\n💬 {esc(reason.strip())}",
+        lambda lang: (
+            f"{t('task.notify.extension_asked', lang)}\n\n{esc(task.title)}\n"
+            f"👤 {esc(actor.full_name)}\n"
+            f"{t('task.notify.was', lang)}: "
+            f"{humanize_due(task.due_at, zone, lang) if task.due_at else t('task.field.no_due', lang)}\n"
+            f"{t('task.notify.will_be', lang)}: {humanize_due(new_due_at, zone, lang)}\n"
+            f"💬 {esc(reason.strip())}"
+        ),
         task.id,
     )
     return extension
@@ -586,7 +614,7 @@ async def decide_extension(
     approved: bool,
     comment: str | None = None,
 ) -> None:
-    _require(extension.status == ExtensionStatus.NEW, "Запрос уже рассмотрен.")
+    _require(extension.status == ExtensionStatus.NEW, t("task.err.extension_decided", actor.locale))
 
     extension.status = ExtensionStatus.APPROVED if approved else ExtensionStatus.DECLINED
     extension.decided_by = actor.id
@@ -615,17 +643,19 @@ async def decide_extension(
             reason=extension.reason,
         )
 
-    verdict = "продлён" if approved else "оставлен прежним"
+    verdict_key = "task.notify.extension_done" if approved else "task.notify.extension_kept"
     asker = await session.get(User, extension.requested_by)
     zone = asker.timezone if asker else None
-    speech = asker.locale if asker else None
     await _notify(
         session, extension.requested_by,
         f"task:{task.id}:extdone:{extension.id}", "task.extension_decided",
         NotificationPriority.NORMAL,
-        f"⏰ <b>Срок {verdict}</b>\n\n{esc(task.title)}\n"
-        f"Срок: {humanize_due(task.due_at, zone, speech) if task.due_at else 'без срока'}"
-        + (f"\n💬 {esc(comment)}" if comment else ""),
+        lambda lang: (
+            f"{t(verdict_key, lang)}\n\n{esc(task.title)}\n"
+            f"{t('task.field.due', lang)}: "
+            f"{humanize_due(task.due_at, zone, lang) if task.due_at else t('task.field.no_due', lang)}"
+            + (f"\n💬 {esc(comment)}" if comment else "")
+        ),
         task.id,
     )
 
@@ -652,7 +682,7 @@ async def add_comment(
     file_name: str | None = None,
 ) -> TaskComment:
     if not text and not telegram_file_id:
-        raise TaskError("Пустой комментарий добавить нельзя.")
+        raise TaskError(t("task.err.empty_comment", author.locale))
 
     comment = TaskComment(
         task_id=task.id,
@@ -674,8 +704,11 @@ async def add_comment(
             session, recipient,
             f"task:{task.id}:comment:{comment.id}", "task.comment",
             NotificationPriority.LOW,
-            f"💬 <b>{esc(author.full_name)}</b> в поручении «{esc(task.title)}»\n"
-            + esc(text or f"📎 {file_name or 'файл'}"),
+            lambda lang: (
+                "💬 " + t("task.notify.comment", lang,
+                          name=esc(author.full_name), title=esc(task.title))
+                + "\n" + esc(text or f"📎 {file_name or t('task.comment.file', lang)}")
+            ),
             task.id,
         )
     return comment
@@ -789,9 +822,19 @@ async def _notify(
     event_key: str,
     kind: str,
     priority: NotificationPriority,
-    body: str,
+    body: Callable[[str | None], str],
     task_id: int,
 ) -> None:
+    """Кладёт уведомление в очередь.
+
+    Текст передаётся не строкой, а функцией от языка: получателя эта функция
+    находит сама, и собрать сообщение раньше — значит собрать его на языке
+    отправителя. Уведомление о поручении читает исполнитель, а не тот, кто
+    поручение выдал, и язык у них разный.
+
+    По той же причине сюда уже передавался часовой пояс получателя: срок,
+    показанный в чужом поясе, — ошибка того же рода.
+    """
     if user_id is None:
         return
     recipient = await session.get(User, user_id)
@@ -802,7 +845,7 @@ async def _notify(
         event_key=event_key,
         kind=kind,
         priority=priority,
-        body=body,
+        body=body(recipient.locale if recipient else None),
         payload={"task_id": task_id},
         timezone_name=recipient.timezone if recipient else None,
     )

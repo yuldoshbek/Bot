@@ -33,6 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dates import humanize_due
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import utcnow
 from app.models.enums import (
@@ -129,7 +130,7 @@ async def process(
                 stats["escalated"] += await _escalate(
                     session, task, task.on_behalf_of_id or task.creator_id, people,
                     key=f"pc:{version}",
-                    header="🔴 <b>Просрочено поручение на вашем контроле</b>",
+                    header_key="deadline.personal_overdue",
                     priority=NotificationPriority.CRITICAL,
                 )
 
@@ -138,7 +139,8 @@ async def process(
             stats["escalated"] += await _escalate(
                 session, task, head_id, people,
                 key=f"esc1:{version}",
-                header=f"🔴 <b>Просрочка в вашем отделе: {overdue_days} дн.</b>",
+                header_key="deadline.department_overdue",
+                header_args={"days": overdue_days},
             )
 
         if desired >= LEVEL_ASSISTANT > task.escalation_level:
@@ -146,7 +148,8 @@ async def process(
             stats["escalated"] += await _escalate(
                 session, task, assistant_id, people,
                 key=f"esc3:{version}",
-                header=f"🔴 <b>Требует вмешательства: просрочка {overdue_days} дн.</b>",
+                header_key="deadline.needs_action",
+                header_args={"days": overdue_days},
             )
 
         task.escalation_level = desired
@@ -172,13 +175,15 @@ async def _remind(
     со сроком через десять часов не должно получить три напоминания подряд.
     """
     if left <= timedelta(hours=4):
-        code, when_text = "today", "сегодня"
+        code, when_key = "today", "common.today"
     elif left <= timedelta(hours=24):
-        code, when_text = "24", "завтра"
+        code, when_key = "24", "common.tomorrow"
     elif left <= timedelta(hours=48):
-        code, when_text = "48", "через 2 дня"
+        code, when_key = "48", "deadline.in_2_days"
     else:
         return 0
+
+    lang = assignee.locale
 
     created = await enqueue(
         session,
@@ -188,8 +193,9 @@ async def _remind(
         kind="task.due_soon",
         priority=NotificationPriority.NORMAL,
         body=(
-            f"⏰ <b>Срок {when_text}</b>\n\n{esc(task.title)}\n"
-            f"📅 {humanize_due(task.due_at, assignee.timezone, assignee.locale)}"
+            f"{t('deadline.soon', lang, when=t(when_key, lang))}\n\n"
+            f"{esc(task.title)}\n"
+            f"📅 {humanize_due(task.due_at, assignee.timezone, lang)}"
         ),
         payload={"task_id": task.id},
         timezone_name=assignee.timezone,
@@ -208,9 +214,10 @@ async def _notify_overdue(
         kind="task.overdue",
         priority=_priority_of(task),
         body=(
-            f"🔴 <b>Срок истёк</b>\n\n{esc(task.title)}\n"
-            f"⏰ Был: {humanize_due(task.due_at, assignee.timezone, assignee.locale)}\n\n"
-            "Отчитайтесь о выполнении или попросите перенести срок."
+            f"{t('deadline.expired', assignee.locale)}\n\n{esc(task.title)}\n"
+            f"⏰ {t('deadline.was', assignee.locale)}: "
+            f"{humanize_due(task.due_at, assignee.timezone, assignee.locale)}\n\n"
+            f"{t('deadline.what_to_do', assignee.locale)}"
         ),
         payload={"task_id": task.id},
         timezone_name=assignee.timezone,
@@ -225,9 +232,16 @@ async def _escalate(
     people: dict[int, User],
     *,
     key: str,
-    header: str,
+    header_key: str,
+    header_args: dict[str, object] | None = None,
     priority: NotificationPriority = NotificationPriority.NORMAL,
 ) -> int:
+    """Ступень эскалации.
+
+    Заголовок передаётся ключом, а не готовой строкой: получателя эта функция
+    находит сама, и собранный заранее текст был бы на языке того, кто считает
+    просрочки, — то есть фонового цикла, у которого языка нет вовсе.
+    """
     if recipient_id is None or recipient_id == task.assignee_id:
         return 0
 
@@ -236,6 +250,8 @@ async def _escalate(
         return 0
 
     assignee = people.get(task.assignee_id)
+    lang = recipient.locale
+    header = t(header_key, lang, **(header_args or {}))
     created = await enqueue(
         session,
         user_id=recipient_id,
@@ -245,8 +261,10 @@ async def _escalate(
         priority=priority,
         body=(
             f"{header}\n\n{esc(task.title)}\n"
-            f"👤 Исполнитель: {esc(assignee.full_name) if assignee else '—'}\n"
-            f"⏰ Срок был: {humanize_due(task.due_at, recipient.timezone, recipient.locale)}"
+            f"👤 {t('task.field.assignee', lang)}: "
+            f"{esc(assignee.full_name) if assignee else '—'}\n"
+            f"⏰ {t('deadline.was', lang)}: "
+            f"{humanize_due(task.due_at, recipient.timezone, lang)}"
         ),
         payload={"task_id": task.id},
         timezone_name=recipient.timezone,
