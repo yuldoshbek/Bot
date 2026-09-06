@@ -536,6 +536,7 @@ async def with_database() -> None:
         "app/bot/handlers/availability.py",
         "app/bot/handlers/menu.py",
         "app/bot/handlers/start.py",
+        "app/bot/handlers/registry.py",
         "app/bot/keyboards/common.py",
         "app/bot/middlewares/auth.py",
         "app/services/dashboard.py",
