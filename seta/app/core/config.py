@@ -28,9 +28,18 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://seta:seta@localhost:5432/seta"
     redis_url: str = "redis://localhost:6379/0"
 
-    # ИИ (блок 6)
+    # ИИ (блок 6). Выключен по умолчанию: система обязана работать целиком
+    # и без него, а включение — осознанное действие с ключом и бюджетом.
+    ai_enabled: bool = False
     openai_api_key: str = ""
+    # Потолки расхода. При превышении ИИ отключается, администратор получает
+    # уведомление, система продолжает работать полностью.
     ai_daily_budget_usd: float = 1.0
+    ai_monthly_budget_usd: float = 20.0
+    # Рутина — младшая модель, недельный отчёт — старшая, речь — whisper.
+    ai_model_routine: str = "gpt-4o-mini"
+    ai_model_report: str = "gpt-4o"
+    ai_model_voice: str = "whisper-1"
 
     # Рабочие правила по умолчанию (настраиваются в админке на отдел/человека)
     work_start: str = "09:00"
