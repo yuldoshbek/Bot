@@ -31,6 +31,7 @@ from datetime import datetime, time, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import parse_hhmm, to_local, utcnow
 from app.models import (
@@ -219,16 +220,22 @@ async def build_for(
         return None, board
 
     local = to_local(now, viewer.timezone)
-    header = f"☀️ <b>Утро · {local.strftime('%d.%m')}</b>"
-    text = dashboard.render(board, header=header)
+    # Язык получателя, а не отправителя: сводку собирает фоновый цикл, у которого
+    # своего языка нет вовсе, и рассылает её людям с разными настройками.
+    locale = viewer.locale
+    header = "<b>" + t("digest.title", locale, date=local.strftime("%d.%m")) + "</b>"
+    text = dashboard.render(board, header=header, locale=locale)
 
     if chiefs:
-        block = ["", "<b>У руководителя сегодня</b>"]
+        block = ["", f"<b>{t('digest.chief_today', locale)}</b>"]
         for item in chiefs:
-            parts = [f"встреч {item.meetings}"]
-            if item.requests:
-                parts.append(f"заявок ждут ответа {item.requests}")
-            block.append(f"👤 {esc(item.name)}: {', '.join(parts)}")
+            line = (
+                t("digest.chief_line_requests", locale,
+                  meetings=item.meetings, requests=item.requests)
+                if item.requests
+                else t("digest.chief_line", locale, meetings=item.meetings)
+            )
+            block.append(f"👤 {esc(item.name)}: {line}")
         text += "\n" + "\n".join(block)
 
     return text, board

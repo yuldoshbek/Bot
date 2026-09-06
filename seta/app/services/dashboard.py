@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt, to_local, utcnow
 from app.models import (
@@ -80,7 +81,9 @@ class Board:
     stale_decisions: int = 0
 
     overdue_total: int = 0
-    overdue_by_department: list[tuple[str, int]] = field(default_factory=list)
+    # None вместо названия означает «поручение без отдела»: подпись для этого
+    # случая ставит отрисовка, на языке смотрящего.
+    overdue_by_department: list[tuple[str | None, int]] = field(default_factory=list)
     # Хвост сводки: отделы, не поместившиеся в верхние строки. Существует
     # ради того, чтобы сумма сводки сходилась с общим числом.
     overdue_other: int = 0
@@ -192,15 +195,14 @@ async def build(
     board.overdue_total = int(await session.scalar(select(func.count(Task.id)).where(*overdue)) or 0)
 
     if board.overdue_total:
-        # Сводка по отделам — один запрос с группировкой по самому столбцу:
-        # группировать по `coalesce(...)` нельзя, Postgres не сопоставляет
-        # выражение в SELECT с выражением в GROUP BY, когда в них разные
-        # подстановки. Подпись «вне отделов» ставится над сгруппированным
-        # столбцом — это выражение от него и потому допустимо.
+        # Сводка по отделам — один запрос с группировкой по самому столбцу.
         rows = (
             await session.execute(
+                # Название отдела остаётся как есть, включая NULL: подпись
+                # «вне отделов» — это язык, а язык подставляет тот, кто
+                # показывает, а не тот, кто считает.
                 select(
-                    func.coalesce(Department.name, "вне отделов"),
+                    Department.name,
                     func.count(Task.id),
                 )
                 .outerjoin(Department, Department.id == Task.department_id)
@@ -246,7 +248,7 @@ async def build(
 
 
 # ── Отрисовка ───────────────────────────────────────────────────────────────
-def render(board: Board, *, header: str | None = None) -> str:
+def render(board: Board, *, header: str | None = None, locale: str | None = None) -> str:
     """Экран одним сообщением. Пустой блок не рисуется вовсе.
 
     Живёт в службе, а не в обработчике, потому что этот же текст уходит утренней
@@ -259,58 +261,65 @@ def render(board: Board, *, header: str | None = None) -> str:
     """
     tz = board.timezone
     local = to_local(board.day, tz)
-    lines = [header or f"<b>Мой день · {local.strftime('%d.%m')}</b>", ""]
+    title = t("meeting.day.title", locale, date=local.strftime("%d.%m"))
+    lines = [header or f"<b>{title}</b>", ""]
 
     if board.running:
-        lines.append("<b>Сейчас</b>")
+        lines.append(f"<b>{t('meeting.day.now', locale)}</b>")
         for m in board.running:
-            lines.append(f"🔴 {esc(m.title)} — до {to_local(m.end_at, tz):%H:%M}")
+            until = t("meeting.day.until", locale, time=f"{to_local(m.end_at, tz):%H:%M}")
+            lines.append(f"🔴 {esc(m.title)} — {until}")
         lines.append("")
 
     if board.ahead:
-        lines.append("<b>Дальше</b>")
+        lines.append(f"<b>{t('meeting.day.next', locale)}</b>")
         for m in board.ahead:
             lines.append(f"🕐 {to_local(m.start_at, tz):%H:%M} {esc(m.title)}")
     elif not board.running:
-        lines.append("Встреч на сегодня нет.")
+        lines.append(t("meeting.day.none", locale))
 
     if board.free_slot:
-        lines.append(f"🟢 Свободно с {to_local(board.free_slot.start, tz):%H:%M}")
+        lines.append(t("meeting.day.free_from", locale,
+                       time=f"{to_local(board.free_slot.start, tz):%H:%M}"))
 
     if board.needs_decision:
-        lines += ["", "<b>Требует решения</b>"]
+        lines += ["", f"<b>{t('meeting.day.needs_decision', locale)}</b>"]
         if board.requests_waiting:
             tail = (
-                f", сверх лимита {board.requests_over_quota}"
+                t("meeting.day.requests_over", locale, count=board.requests_over_quota)
                 if board.requests_over_quota
                 else ""
             )
-            lines.append(f"📥 Заявок на встречу: {board.requests_waiting}{tail}")
+            lines.append(
+                t("meeting.day.requests", locale, count=board.requests_waiting) + tail
+            )
         if board.to_review:
-            lines.append(f"🔍 Ждут вашей проверки: {board.to_review}")
+            lines.append(t("meeting.day.to_review", locale, count=board.to_review))
         if board.stale_decisions:
-            lines.append(f"📌 Решений с прошедшим сроком: {board.stale_decisions}")
+            lines.append(
+                t("meeting.day.stale_decisions", locale, count=board.stale_decisions)
+            )
 
     if board.overdue_total:
         # Сводкой, а не поштучно: решение Р-10. Поимённо — только личный контроль.
-        lines += ["", f"<b>Просрочено: {board.overdue_total}</b>"]
+        lines += ["", f"<b>{t('meeting.day.overdue', locale, count=board.overdue_total)}</b>"]
         for name, count in board.overdue_by_department:
-            lines.append(f"• {esc(name)}: {count}")
+            shown = esc(name) if name else t("dashboard.no_department", locale)
+            lines.append(f"• {shown}: {count}")
         if board.overdue_other:
-            lines.append(f"• в остальных отделах: {board.overdue_other}")
+            lines.append(t("meeting.day.overdue_other", locale, count=board.overdue_other))
         if board.personal_overdue:
             lines.append("")
-            lines.append("<b>На личном контроле</b>")
+            lines.append(f"<b>{t('meeting.day.personal', locale)}</b>")
             for task in board.personal_overdue:
-                lines.append(
-                    f"‼️ {esc(cut(task.title, 60))} — срок {fmt_dt(task.due_at, tz)}"
-                )
+                due = t("meeting.day.due", locale, when=fmt_dt(task.due_at, tz))
+                lines.append(f"‼️ {esc(cut(task.title, 60))} — {due}")
 
     if board.metrics:
-        lines += ["", "<b>Показатели за 30 дней</b>"]
-        lines += [f"· {esc(metric.render())}" for metric in board.metrics]
+        lines += ["", f"<b>{t('meeting.day.metrics', locale)}</b>"]
+        lines += [f"· {esc(metric.render(locale))}" for metric in board.metrics]
 
     if board.quiet:
-        lines += ["", "Ничего не требует внимания."]
+        lines += ["", t("meeting.day.quiet", locale)]
 
     return "\n".join(lines)

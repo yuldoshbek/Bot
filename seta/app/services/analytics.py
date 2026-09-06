@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.timeutil import utcnow
 from app.models import (
     Decision,
@@ -77,26 +78,46 @@ class Metric:
     """
 
     key: str
-    title: str
     value: float | None = None
+    # Единица — тоже ключ словаря: «мин» и «ч» на разных языках пишутся по-разному.
     unit: str = ""
-    detail: str = ""
+    # Пояснение хранится ключом и подстановками, а не готовой строкой: оно
+    # складывается при подсчёте, а читают его позже и на своём языке. Показатель
+    # считается один раз, а смотрят его люди с разными языками — готовая строка
+    # намертво зафиксировала бы язык того, кто первым открыл экран.
+    detail_key: str = ""
+    detail_args: dict[str, object] = field(default_factory=dict)
     rows: list[tuple[str, float]] = field(default_factory=list)
 
     @property
     def no_data(self) -> bool:
         return self.value is None and not self.rows
 
-    def render(self) -> str:
+    def title(self, locale: str | None = None) -> str:
+        return t(f"metric.{self.key}", locale)
+
+    def detail(self, locale: str | None = None) -> str:
+        if not self.detail_key:
+            return ""
+        return t(self.detail_key, locale, **self.detail_args)
+
+    def say(self, key: str, **args: object) -> None:
+        """Запомнить пояснение: ключ и подстановки, а не собранная строка."""
+        self.detail_key = key
+        self.detail_args = args
+
+    def render(self, locale: str | None = None) -> str:
         """Строка для сообщения. Пустой показатель говорит «нет данных»."""
+        title = self.title(locale)
         if self.no_data:
-            return f"{self.title}: нет данных"
+            return f"{title}: {t('metric.no_data', locale)}"
         if self.value is None:
-            head = self.title
+            head = title
         else:
             shown = f"{self.value:.0f}" if float(self.value).is_integer() else f"{self.value:.1f}"
-            head = f"{self.title}: {shown}{self.unit}"
-        return f"{head} — {self.detail}" if self.detail else head
+            head = f"{title}: {shown}{t(self.unit, locale) if self.unit else ''}"
+        detail = self.detail(locale)
+        return f"{head} — {detail}" if detail else head
 
 
 @dataclass(slots=True)
@@ -105,17 +126,26 @@ class Period:
 
     since: datetime
     until: datetime
-    title: str = ""
+    # Подпись хранится ключом и подстановками, как и пояснение показателя:
+    # период считается один раз, а называют его людям на разных языках.
+    title_key: str = ""
+    title_args: dict[str, object] = field(default_factory=dict)
 
     @property
     def days(self) -> int:
         return max(1, (self.until - self.since).days)
 
+    def title(self, locale: str | None = None) -> str:
+        return t(self.title_key, locale, **self.title_args) if self.title_key else ""
+
 
 def month_back(now: datetime | None = None, days: int = 30) -> Period:
     """Последние N дней — период по умолчанию для дашборда."""
     now = now or utcnow()
-    return Period(since=now - timedelta(days=days), until=now, title=f"за {days} дней")
+    # Заголовок периода — ключ и число: период считают один раз, а читают
+    # его люди с разными языками.
+    return Period(since=now - timedelta(days=days), until=now,
+                  title_key="metric.period.days", title_args={"days": days})
 
 
 @dataclass(slots=True)
@@ -239,7 +269,7 @@ async def calendar_load(
     у руководителя с приёмом до 19:00 и у сотрудника с обедом разные сутки,
     и общий делитель превратил бы показатель в художественное число.
     """
-    metric = Metric(key="calendar_load", title="Загрузка календаря", unit="%")
+    metric = Metric(key="calendar_load", unit="metric.unit.percent")
 
     busy = await session.scalar(
         select(func.coalesce(func.sum(_minutes(Meeting.start_at, Meeting.end_at)), 0.0))
@@ -278,11 +308,11 @@ async def calendar_load(
     )
     available = float(weekly or 0.0) * period.days / 7.0
     if available <= 0:
-        metric.detail = "рабочие часы не заданы"
+        metric.say("metric.detail.no_hours")
         return metric
 
     metric.value = round(float(busy or 0.0) / available * 100, 1)
-    metric.detail = f"{int(busy or 0)} мин из {int(available)}"
+    metric.say("metric.detail.busy_of", busy=int(busy or 0), total=int(available))
     return metric
 
 
@@ -291,7 +321,7 @@ async def time_spenders(
     session: AsyncSession, *, audience: Audience, period: Period, limit: int = 5
 ) -> Metric:
     """Сумма минут по инициаторам встреч. Рейтинг, а не одно число."""
-    metric = Metric(key="time_spenders", title="Кто расходует время", unit=" мин")
+    metric = Metric(key="time_spenders", unit="metric.unit.minutes")
 
     rows = (
         await session.execute(
@@ -315,8 +345,9 @@ async def time_spenders(
         return metric
 
     names = await _names(session, {row[0] for row in rows})
-    metric.rows = [(names.get(row[0], "неизвестно"), round(float(row[1]), 0)) for row in rows]
-    metric.detail = f"верхние {len(metric.rows)}"
+    # None означает «имя не нашлось» — язык подставит тот, кто будет показывать.
+    metric.rows = [(names.get(row[0]), round(float(row[1]), 0)) for row in rows]
+    metric.say("metric.detail.top", count=len(metric.rows))
     return metric
 
 
@@ -325,7 +356,7 @@ async def meeting_cost(
     session: AsyncSession, *, audience: Audience, period: Period, limit: int = 5
 ) -> Metric:
     """Участники × длительность в человеко-часах. Топ самых дорогих."""
-    metric = Metric(key="meeting_cost", title="Стоимость совещаний", unit=" чел·ч")
+    metric = Metric(key="meeting_cost", unit="metric.unit.person_hours")
 
     # После соединения с участниками каждая встреча даёт строку на человека,
     # поэтому сумма длительностей и есть человеко-минуты: отдельно умножать
@@ -350,7 +381,7 @@ async def meeting_cost(
 
     metric.rows = [(row[0], round(float(row[1]), 1)) for row in rows]
     metric.value = round(sum(value for _, value in metric.rows), 1)
-    metric.detail = f"верхние {len(metric.rows)}"
+    metric.say("metric.detail.top", count=len(metric.rows))
     return metric
 
 
@@ -363,7 +394,7 @@ async def punctuality(
     Считается только по тем, кто отмечался: участник без отметки — это «нет
     записи», а не установленный прогул, и попадать в знаменатель он не должен.
     """
-    metric = Metric(key="punctuality", title="Пунктуальность", unit="%")
+    metric = Metric(key="punctuality", unit="metric.unit.percent")
 
     conditions = [
         Meeting.organization_id == audience.organization_id,
@@ -385,11 +416,11 @@ async def punctuality(
     ).one()
     total, late = int(row[0] or 0), int(row[1] or 0)
     if total == 0:
-        metric.detail = "отметок явки нет"
+        metric.say("metric.detail.no_checkins")
         return metric
 
     metric.value = round((total - late) / total * 100, 1)
-    metric.detail = f"вовремя {total - late} из {total}"
+    metric.say("metric.detail.on_time_of", ok=total - late, total=total)
     return metric
 
 
@@ -402,7 +433,7 @@ async def deadline_discipline(
     В знаменатель идут только поручения, у которых срок был и которые уже
     закрыты: незавершённое поручение ещё ничего не говорит о дисциплине.
     """
-    metric = Metric(key="deadline_discipline", title="Дисциплина сроков", unit="%")
+    metric = Metric(key="deadline_discipline", unit="metric.unit.percent")
 
     row = (
         await session.execute(
@@ -421,11 +452,11 @@ async def deadline_discipline(
     ).one()
     total, in_time = int(row[0] or 0), int(row[1] or 0)
     if total == 0:
-        metric.detail = "завершённых поручений со сроком нет"
+        metric.say("metric.detail.no_finished_due")
         return metric
 
     metric.value = round(in_time / total * 100, 1)
-    metric.detail = f"в срок {in_time} из {total}"
+    metric.say("metric.detail.in_time_of", ok=in_time, total=total)
     return metric
 
 
@@ -438,7 +469,7 @@ async def chronic_extensions(
     Считаются именно одобренные: отклонённая просьба ничего не сдвинула,
     и ставить её человеку в счёт нельзя.
     """
-    metric = Metric(key="chronic_extensions", title="Хронические переносы", unit=" продл.")
+    metric = Metric(key="chronic_extensions", unit="metric.unit.extensions")
 
     rows = (
         await session.execute(
@@ -456,7 +487,7 @@ async def chronic_extensions(
         )
     ).all()
     if not rows:
-        metric.detail = "одобренных продлений нет"
+        metric.say("metric.detail.no_extensions")
         return metric
 
     names = await _names(session, {row[0] for row in rows})
@@ -474,7 +505,7 @@ async def reaction_time(
     Непринятые в знаменатель не идут: поручение, которое ещё не приняли,
     не имеет времени реакции — у него есть только возраст.
     """
-    metric = Metric(key="reaction_time", title="Скорость реакции", unit=" ч")
+    metric = Metric(key="reaction_time", unit="metric.unit.hours")
 
     row = (
         await session.execute(
@@ -491,11 +522,11 @@ async def reaction_time(
     ).one()
     total, average = int(row[0] or 0), row[1]
     if total == 0 or average is None:
-        metric.detail = "принятых поручений нет"
+        metric.say("metric.detail.no_accepted")
         return metric
 
     metric.value = round(float(average), 1)
-    metric.detail = f"по {total} поручениям"
+    metric.say("metric.detail.by_tasks", count=total)
     return metric
 
 
@@ -508,7 +539,7 @@ async def rework_rate(
     Знаменатель — поручения, которые вообще проходили проверку: без проверки
     вернуть было некуда, и включать их значило бы занижать показатель.
     """
-    metric = Metric(key="rework_rate", title="Возвраты на доработку", unit="%")
+    metric = Metric(key="rework_rate", unit="metric.unit.percent")
 
     reviewed = select(Task.id).where(
         *_tasks_in(audience),
@@ -520,7 +551,7 @@ async def rework_rate(
 
     total = await session.scalar(select(func.count()).select_from(reviewed))
     if not total:
-        metric.detail = "поручений на проверке не было"
+        metric.say("metric.detail.no_review")
         return metric
 
     returned = await session.scalar(
@@ -530,7 +561,7 @@ async def rework_rate(
         )
     )
     metric.value = round(int(returned or 0) / int(total) * 100, 1)
-    metric.detail = f"вернули {int(returned or 0)} из {int(total)}"
+    metric.say("metric.detail.returned_of", returned=int(returned or 0), total=int(total))
     return metric
 
 
@@ -544,7 +575,7 @@ async def fruitless_meetings(
     по определению, и попадание в знаменатель делало бы показатель
     зависимым от того, сколько всего запланировано.
     """
-    metric = Metric(key="fruitless_meetings", title="Встречи без результата", unit="%")
+    metric = Metric(key="fruitless_meetings", unit="metric.unit.percent")
 
     finished = select(Meeting.id).where(
         Meeting.organization_id == audience.organization_id,
@@ -556,7 +587,7 @@ async def fruitless_meetings(
 
     total = await session.scalar(select(func.count()).select_from(finished))
     if not total:
-        metric.detail = "завершённых встреч нет"
+        metric.say("metric.detail.no_finished_meetings")
         return metric
 
     with_result = await session.scalar(
@@ -569,7 +600,7 @@ async def fruitless_meetings(
     )
     empty = int(total) - int(with_result or 0)
     metric.value = round(empty / int(total) * 100, 1)
-    metric.detail = f"без итогов {empty} из {int(total)}"
+    metric.say("metric.detail.without_outcome", empty=empty, total=int(total))
     return metric
 
 
@@ -582,7 +613,7 @@ async def decision_speed(
     Заявки, истёкшие без ответа, в среднее не идут — но считаются отдельно
     и показываются в пояснении: молчание тоже ответ, просто худший.
     """
-    metric = Metric(key="decision_speed", title="Скорость решений", unit=" ч")
+    metric = Metric(key="decision_speed", unit="metric.unit.hours")
 
     conditions = [
         MeetingRequest.organization_id == audience.organization_id,
@@ -612,13 +643,16 @@ async def decision_speed(
     ).one()
     total, average, expired = int(row[0] or 0), row[1], int(row[2] or 0)
     if total == 0 or average is None:
-        metric.detail = "рассмотренных заявок нет"
+        metric.say("metric.detail.no_requests")
         return metric
 
     metric.value = round(float(average), 1)
-    metric.detail = f"по {total} заявкам"
+    # Целый ключ, а не приписка к готовой строке: `detail` теперь собирается
+    # на языке читателя, и дописать к нему кусок по-русски уже нельзя.
     if expired:
-        metric.detail += f", без ответа истекло {expired}"
+        metric.say("metric.detail.by_requests_expired", count=total, expired=expired)
+    else:
+        metric.say("metric.detail.by_requests", count=total)
     return metric
 
 
@@ -631,7 +665,7 @@ async def repeating_topics(
     Темы сравниваются по нормализованной формулировке — регистр и лишние
     пробелы не должны превращать одно совещание в два разных.
     """
-    metric = Metric(key="repeating_topics", title="Повторяющиеся темы", unit=" встреч")
+    metric = Metric(key="repeating_topics", unit="metric.unit.meetings")
 
     topic = func.lower(func.btrim(Meeting.title))
     rows = (
@@ -649,7 +683,7 @@ async def repeating_topics(
         )
     ).all()
     if not rows:
-        metric.detail = f"тем, повторённых {REPEAT_THRESHOLD} раза и больше, нет"
+        metric.say("metric.detail.no_repeats", count=REPEAT_THRESHOLD)
         return metric
 
     metric.rows = [(row[0], float(row[1])) for row in rows]
@@ -666,7 +700,7 @@ async def availability_lag(
     Считается по одобренным заявкам: от подачи до начала встречи. Отклонённые
     и истёкшие не показывают доступность — они показывают отказ.
     """
-    metric = Metric(key="availability_lag", title="Ожидание окна", unit=" дн.")
+    metric = Metric(key="availability_lag", unit="metric.unit.days")
 
     conditions = [
         MeetingRequest.organization_id == audience.organization_id,
@@ -690,11 +724,11 @@ async def availability_lag(
     ).one()
     total, average = int(row[0] or 0), row[1]
     if total == 0 or average is None:
-        metric.detail = "одобренных заявок нет"
+        metric.say("metric.detail.no_approved")
         return metric
 
     metric.value = round(float(average), 1)
-    metric.detail = f"по {total} заявкам"
+    metric.say("metric.detail.by_requests", count=total)
     return metric
 
 
@@ -708,7 +742,7 @@ async def schedule_jams(
     у нас начинается на пять часов раньше, и по UTC часть утра уехала бы
     в воскресенье.
     """
-    metric = Metric(key="schedule_jams", title="Пробки в расписании", unit=" дн.")
+    metric = Metric(key="schedule_jams", unit="metric.unit.days")
 
     local_day = func.date(func.timezone(audience.timezone, Meeting.start_at))
     rows = (
@@ -726,7 +760,7 @@ async def schedule_jams(
         )
     ).all()
     if not rows:
-        metric.detail = f"дней с {JAM_MEETINGS_PER_DAY} и более встречами нет"
+        metric.say("metric.detail.no_jams", count=JAM_MEETINGS_PER_DAY)
         return metric
 
     metric.rows = [(row[0].strftime("%d.%m"), float(row[1])) for row in rows]
@@ -743,7 +777,7 @@ async def overdue_trend(
     Знак важнее величины: вопрос не «сколько просрочек», а «стало хуже
     или лучше». Плюс — деградация, минус — улучшение.
     """
-    metric = Metric(key="overdue_trend", title="Тренд просрочек", unit="")
+    metric = Metric(key="overdue_trend")
 
     length = period.until - period.since
     previous_since = period.since - length
@@ -779,13 +813,13 @@ async def overdue_trend(
         )
     ).all()
     if not rows:
-        metric.detail = "поручений с отделом нет"
+        metric.say("metric.detail.no_dept_tasks")
         return metric
 
     metric.rows = [(row[0], float(int(row[1] or 0) - int(row[2] or 0))) for row in rows]
     metric.rows.sort(key=lambda item: item[1], reverse=True)
     metric.value = float(sum(value for _, value in metric.rows))
-    metric.detail = "плюс — стало хуже, минус — лучше"
+    metric.say("metric.detail.trend_hint")
     return metric
 
 
@@ -800,7 +834,7 @@ async def overload_forecast(
     """
     now = now or utcnow()
     horizon = now + timedelta(days=FORECAST_DAYS)
-    metric = Metric(key="overload_forecast", title="Ближайшая неделя", unit="")
+    metric = Metric(key="overload_forecast")
 
     meetings = await session.scalar(
         select(func.count(Meeting.id)).where(
@@ -832,14 +866,23 @@ async def overload_forecast(
 
     meetings, deadlines = int(meetings or 0), int(deadlines or 0)
     if not meetings and not deadlines:
-        metric.detail = "встреч и сроков впереди нет"
+        metric.say("metric.detail.nothing_ahead")
         return metric
 
     metric.value = float(meetings + deadlines)
-    parts = [f"встреч {meetings} на {int(minutes or 0)} мин", f"сроков {deadlines}"]
+    # Два целых ключа, а не сборка из кусков: порядок слов в языках разный,
+    # и склеенные через запятую обрывки в узбекском встали бы не туда.
     if critical:
-        parts.append(f"из них важных {int(critical)}")
-    metric.detail = ", ".join(parts)
+        metric.say(
+            "metric.detail.forecast_critical",
+            meetings=meetings, minutes=int(minutes or 0),
+            deadlines=deadlines, critical=int(critical),
+        )
+    else:
+        metric.say(
+            "metric.detail.forecast",
+            meetings=meetings, minutes=int(minutes or 0), deadlines=deadlines,
+        )
     return metric
 
 

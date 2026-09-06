@@ -519,6 +519,37 @@ async def with_database() -> None:
         check(RU["task.status.in_progress"] not in listed["uz"],
               "и статус в узбекском списке не русский", listed["uz"][:80])
 
+    print("\n18. Экран «Мой день» и показатели говорят на языке смотрящего")
+    # Экран собирается из показателей, каждый со своим пояснением, и уходит
+    # ещё и утренней сводкой. Забытый язык здесь виден сразу всем.
+    from app.core.timeutil import utcnow as now_utc
+    from app.services import analytics, dashboard
+
+    board = dashboard.Board(day=now_utc(), timezone="Asia/Tashkent")
+    board.overdue_total = 3
+    board.overdue_by_department = [("Moliya", 2), (None, 1)]
+    board.metrics = [
+        analytics.Metric(key="calendar_load", value=42.0, unit="metric.unit.percent"),
+        analytics.Metric(key="punctuality"),  # молчащий показатель
+    ]
+    board.metrics[0].say("metric.detail.busy_of", busy=180, total=32400)
+
+    screens = {loc: dashboard.render(board, locale=loc) for loc in LOCALES}
+    check(len(set(screens.values())) == 3, "три языка — три разных экрана",
+          str({k: v[:30] for k, v in screens.items()}))
+    strays = sorted(set(re.findall(r"[А-Яа-яЁё]+", screens["uz"])))
+    check(not strays, "в узбекском экране не осталось русских слов", str(strays[:6]))
+    check(RU["metric.calendar_load"] in screens["ru"],
+          "русский экран называет показатель по-русски", screens["ru"][-90:])
+    check(UZ["metric.calendar_load"] in screens["uz"],
+          "узбекский — по-узбекски", screens["uz"][-90:])
+    check(RU["metric.no_data"] in screens["ru"],
+          "молчащий показатель говорит «нет данных» на своём языке", screens["ru"][-60:])
+    check(UZ["metric.no_data"] in screens["uz"], "и по-узбекски тоже",
+          screens["uz"][-60:])
+    check(UZ["dashboard.no_department"] in screens["uz"],
+          "строка без отдела подписана на своём языке", screens["uz"][-90:])
+
     await cleanup()
     async with session_scope() as session:
         left = await session.scalar(

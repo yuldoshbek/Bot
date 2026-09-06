@@ -34,7 +34,13 @@ from app.services.rbac import can_access_object, has_permission, load_grants
 # За сколько минут до начала появляется кнопка «Я на месте».
 CHECKIN_OPENS_MINUTES = 5
 
+# Русские подписи остаются для журнала; на экран оценка выводится по ключу.
 SCORE_LABELS = {1: "Полезная", 0: "Нейтральная", -1: "Бесполезная"}
+SCORE_KEYS = {
+    1: "meeting.score.useful",
+    0: "meeting.score.neutral",
+    -1: "meeting.score.useless",
+}
 
 
 # ── Явка ────────────────────────────────────────────────────────────────────

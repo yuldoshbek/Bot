@@ -278,10 +278,10 @@ async def main() -> None:
         check(
             load.value == 0.0,
             "а загрузка календаря показывает настоящий ноль: часы есть, встреч нет",
-            f"{load.render()}",
+            f"{load.render('ru')}",
         )
         check(
-            all("нет данных" in m.render() for m in silent),
+            all("нет данных" in m.render("ru") for m in silent),
             "и каждый молчащий честно пишет «нет данных», а не 0",
         )
 
@@ -300,7 +300,7 @@ async def main() -> None:
         check(
             bare_load.no_data,
             "без заданных рабочих часов загрузка тоже не выдумывает ноль",
-            bare_load.render(),
+            bare_load.render("ru"),
         )
         check(
             await analytics.all_metrics(
@@ -346,9 +346,9 @@ async def stage_two() -> None:
         # тонет: без вычета обеда вышло бы 0,5 против 0,56 — разница меньше шага
         # округления. Поэтому сверяется и знаменатель целиком.
         check(
-            "180 мин из 32400" in load.detail,
+            "180 мин из 32400" in load.detail("ru"),
             "и знаменатель — рабочие часы за вычетом обеда",
-            load.detail,
+            load.detail("ru"),
         )
 
         cost = await analytics.meeting_cost(session, audience=audience, period=week)
@@ -394,9 +394,9 @@ async def stage_two() -> None:
         check(close_to(punctual.value, 50.0), "одна отметка из двух с опозданием — 50%",
               f"{punctual.value}")
         check(
-            "из 2" in punctual.detail,
+            "из 2" in punctual.detail("ru"),
             "и отсутствовавший в знаменатель не попал",
-            punctual.detail,
+            punctual.detail("ru"),
         )
 
 
@@ -592,8 +592,8 @@ async def stage_four() -> None:
         await session.flush()
         forecast = await analytics.overload_forecast(session, audience=audience, now=NOW)
         check(close_to(forecast.value, 2), "неделя впереди: одна встреча и один срок",
-              f"{forecast.value}: {forecast.detail}")
-        check("важных 1" in forecast.detail, "важный срок отмечен отдельно", forecast.detail)
+              f"{forecast.value}: {forecast.detail('ru')}")
+        check("важных 1" in forecast.detail("ru"), "важный срок отмечен отдельно", forecast.detail("ru"))
 
         print("\n13. Тренд просрочек по отделам")
         trend = await analytics.overdue_trend(session, audience=audience, period=week)
@@ -745,9 +745,22 @@ async def stage_five() -> None:
             f" против {wide.overdue_total}",
         )
         check(
-            any(name == "вне отделов" for name, _ in wide.overdue_by_department),
-            "и оно попало в строку «вне отделов»",
+            any(name is None for name, _ in wide.overdue_by_department),
+            "и оно легло отдельной строкой без отдела",
             f"{wide.overdue_by_department}",
+        )
+        # Подпись ставит отрисовка, а не запрос: проверяется именно готовый
+        # экран, и сразу на двух языках — строка без отдела обязана быть
+        # подписана на языке смотрящего, а не на языке базы.
+        check(
+            "вне отделов" in dashboard.render(wide, locale="ru"),
+            "и подписана «вне отделов» по-русски",
+            dashboard.render(wide, locale="ru")[-120:],
+        )
+        check(
+            "boʻlimsiz" in dashboard.render(wide, locale="uz"),
+            "и «boʻlimsiz» по-узбекски",
+            dashboard.render(wide, locale="uz")[-120:],
         )
 
         print("\n20. Экран сотрудника и счёт запросов")
@@ -796,7 +809,7 @@ async def stage_five() -> None:
         check(board.overdue_total == 0 and not board.overdue_by_department,
               "сводки просрочек нет вовсе, а не «0»")
         text = " ".join(
-            f"{m.title}: {m.value}" for m in board.metrics
+            f"{m.title('ru')}: {m.value}" for m in board.metrics
         )
         check(bool(board.metrics), "показатели при этом посчитаны", text[:80])
         check(
