@@ -715,6 +715,12 @@ async def add_comment(
 
 
 # ── Выборки ─────────────────────────────────────────────────────────────────
+# Разрезы списка поручений. Живут рядом с функцией, которая их понимает,
+# а не в обработчике: тот же набор нужен API, и второй список разошёлся бы
+# с этим на первой же правке.
+BUCKETS = ("active", "today", "overdue", "review", "created", "done")
+
+
 async def my_tasks(
     session: AsyncSession, user: User, *, bucket: str = "active", limit: int = 30
 ) -> list[Task]:

@@ -52,7 +52,7 @@ MAX_HORIZON_DAYS = 366 * 2
 WEEKDAY_KEYS = tuple(f"weekday.{i}" for i in range(7))
 ABSENCE_KEYS = {
     AbsenceKind.VACATION: "absence.vacation",
-    AbsenceKind.TRIP: "absence.business_trip",
+    AbsenceKind.TRIP: "absence.trip",
     AbsenceKind.SICK: "absence.sick",
     AbsenceKind.OTHER: "absence.other",
 }

@@ -5,7 +5,7 @@
 **Бот:** @Uzcosmos_meet_bot, режим long polling
 **Языки:** узбекский латиницей — основной, кириллицей — выводится правилом,
 русский — дополнительный (Р-20)
-**Следующий:** фаза 7 — API для Mini App
+**Следующий:** фаза 8 — Mini App (нужен домен с HTTPS)
 
 ---
 
@@ -70,7 +70,7 @@
 
 ### Проверено
 
-Все восемь наборов на живой базе: **858 проверок, 0 ошибок.**
+Все девять наборов на живой базе: **892 проверки, 0 ошибок.**
 
 | Набор | Проверок | Что покрывает |
 |---|---|---|
@@ -80,7 +80,8 @@
 | `smoke_block3.py` | 168 | Свободные окна, заявки, удержания, лимиты времени, явка, доступ к карточке |
 | `smoke_block4.py` | 179 | Решения, документы, извлечение текста, поиск, выгрузки, досье |
 | `smoke_block5.py` | 139 | Показатели, экран, сводка, шаблоны, админка |
-| `smoke_i18n.py` | 153 | Согласие словарей, перевод письменности, подстановки, смена языка |
+| `smoke_i18n.py` | 156 | Согласие словарей, перевод письменности, подстановки, смена языка |
+| `smoke_api.py` | 31 | Вход по подписи, границы ответа, совпадение API и бота, ограничитель |
 | `stress_test.py` | 81 | Десять нажатий одной кнопки, гонки, чужие идентификаторы, мусорный ввод |
 
 Среди сценариев-отказов, которые важнее успешных:
@@ -147,12 +148,14 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block5.py    # 139 сценариев
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
-  run --rm --no-deps migrate python scripts/smoke_i18n.py      # 153 сценария
+  run --rm --no-deps migrate python scripts/smoke_i18n.py      # 156 сценариев
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  run --rm --no-deps migrate python scripts/smoke_api.py       # 31 сценарий
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/stress_test.py     # 81 проверка на прочность
 ```
 
-Везде ожидается `Ошибок: 0`. Итого 858 проверок. Прогонять все восемь перед началом нового блока.
+Везде ожидается `Ошибок: 0`. Итого 892 проверки. Прогонять все девять перед началом нового блока.
 
 ### Состояние системы
 
@@ -183,7 +186,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml \
 | 4. Шаблоны поручений | **готово** — `app/services/templates.py` |
 | 5. Админка: часы, квоты, праздники, переключатели | **готово** — `orgadmin.py`, `features.py` |
 | 6. Три варианта языка | **готово** — движок, 844 ключа, переведён весь интерфейс |
-| 7. API для Mini App | |
+| 7. API для Mini App | **готово** — вход по подписи `initData`, шесть маршрутов чтения |
 | 8. Mini App | нужен домен с HTTPS |
 
 **Критерий готовности блока:** руководитель открывает один экран и за пять секунд

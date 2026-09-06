@@ -925,10 +925,6 @@ TABLE: dict[str, str] = {
     "common.not_specified": "не указано",
 
     # ── Настройки организации ──
-    "absence.vacation": "отпуск",
-    "absence.business_trip": "командировка",
-    "absence.sick": "больничный",
-    "absence.other": "отсутствие",
     "orgadmin.err.rights": "Настройки меняет администратор.",
     "orgadmin.err.other_org_user": "Этот сотрудник из другой организации.",
     "orgadmin.err.end_before_start": "Конец рабочего дня должен быть позже начала.",

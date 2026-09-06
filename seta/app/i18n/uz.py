@@ -387,9 +387,9 @@ TABLE: dict[str, str] = {
     "admin.audit.empty": "Jurnal hozircha boʻsh.",
 
     # ── Виды отсутствия ─────────────────────────────────────────────────────
-    "absence.vacation": "ta'til",
+    "absence.vacation": "taʼtil",
     "absence.trip": "xizmat safari",
-    "absence.sick": "kasallik varaqasi",
+    "absence.sick": "kasallik",
     "absence.other": "yoʻqlik",
 
     # ── Переключатели разделов ──────────────────────────────────────────────
@@ -932,10 +932,6 @@ TABLE: dict[str, str] = {
     "common.not_specified": "koʻrsatilmagan",
 
     # ── Настройки организации ──
-    "absence.vacation": "taʼtil",
-    "absence.business_trip": "xizmat safari",
-    "absence.sick": "kasallik",
-    "absence.other": "yoʻqlik",
     "orgadmin.err.rights": "Sozlamalarni administrator oʻzgartiradi.",
     "orgadmin.err.other_org_user": "Bu xodim boshqa tashkilotdan.",
     "orgadmin.err.end_before_start": "Ish kunining oxiri boshlanishidan keyin boʻlishi kerak.",

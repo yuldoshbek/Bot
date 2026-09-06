@@ -96,6 +96,27 @@ def main() -> None:
     empty = [k for k, v in list(UZ.items()) + list(RU.items()) if not v.strip()]
     check(not empty, "пустых строк нет", str(empty[:5]))
 
+    # Дубль ключа в словаре Python не ошибка: побеждает последний, первый
+    # тихо пропадает. Сверка множеств такого не видит вовсе — множество
+    # схлопывает повторы, — а на экране остаётся одно из двух написаний,
+    # и не угадать какое. Читается исходник, а не собранный словарь.
+    for path, name in ((ROOT.parent / "app/i18n/uz.py", "uz"),
+                       (ROOT.parent / "app/i18n/ru.py", "ru"),
+                       (ROOT.parent / "app/i18n/uz_cyrl.py", "uz-Cyrl")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        seen: dict[str, int] = {}
+        doubled = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    if key.value in seen:
+                        doubled.append(key.value)
+                    seen[key.value] = 1
+        check(not doubled, f"{name}: каждый ключ встречается один раз",
+              str(sorted(set(doubled))[:5]))
+
     print("\n2. Ни один ключ не остался непереведённым")
     # Одинаковый текст в двух языках — почти всегда забытая правка: строку
     # скопировали из русского словаря в узбекский и не тронули. Законны такие

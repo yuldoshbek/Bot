@@ -34,8 +34,9 @@ from app.services.tasks import TaskError, priority_title, status_title
 
 router = Router(name="tasks")
 
-# Ключи, а не надписи: подпись зависит от языка, набор — нет.
-BUCKETS = ("active", "today", "overdue", "review", "created", "done")
+# Набор разрезов задаёт служба — она же их и разбирает. Здесь только подписи:
+# ключи, а не надписи, потому что подпись зависит от языка, а набор — нет.
+BUCKETS = service.BUCKETS
 BUCKET_KEYS = {name: f"task.list.{name}" for name in BUCKETS}
 
 
