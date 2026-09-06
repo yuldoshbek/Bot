@@ -18,6 +18,7 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
+from app.ai import summary
 from app.services import attendance, briefing, deadlines, digest, indexer, meetings
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
@@ -123,7 +124,12 @@ async def digest_loop() -> None:
             if await acquire_lock("digest:morning", ttl_seconds=DIGEST_INTERVAL * 2):
                 try:
                     async with session_scope() as session:
-                        sent = await digest.send_digests(session)
+                        # Кто пишет вступление словами, знает цикл, а не служба:
+                        # сводка обязана собираться и без ИИ. Выключенный ИИ
+                        # вернёт пустую строку, и письмо уйдёт прежним.
+                        sent = await digest.send_digests(
+                            session, accents=summary.accents
+                        )
                     if sent:
                         log.info("утренних сводок поставлено: %s", sent)
                 finally:

@@ -23,8 +23,15 @@
 **Пустой день не рассылается.** Сводка «сегодня ничего» — это письмо, которое
 через неделю перестают открывать, и вместе с ним перестают открывать те, где
 что-то есть. Если ни встреч, ни просрочек, ни ожидающих решения, письма нет.
+
+**Кто пишет вступление словами, службе неизвестно.** Функция передаётся
+снаружи — так же, как индексатору передают чтение файла. Служба обязана
+собирать письмо и без неё: сводка с цифрами остаётся основной, а вступление
+добавкой. Иначе выключенный ИИ пришлось бы обходить условием в самой сводке,
+и «письмо уходит слово в слово прежнее» стало бы обещанием вместо проверки.
 """
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
@@ -188,12 +195,24 @@ async def chiefs_day(
     ]
 
 
+# Кто пишет вступление словами: доска и получатель на входе, строка на выходе.
+# Пустая строка означает «вступления нет», и это обычный исход.
+Accents = Callable[[AsyncSession, dashboard.Board, User], Awaitable[str]]
+
+
 async def build_for(
-    session: AsyncSession, *, viewer: User, now: datetime
+    session: AsyncSession,
+    *,
+    viewer: User,
+    now: datetime,
+    accents: Accents | None = None,
 ) -> tuple[str | None, dashboard.Board]:
     """Текст сводки для человека. None — отправлять нечего.
 
     Возвращает и доску: вызывающему бывает нужно знать, почему письма нет.
+
+    Без `accents` письмо собирается ровно так, как собиралось до появления
+    ИИ, — это и проверяется сравнением слово в слово.
     """
     grants = await load_grants(session, viewer)
     state = await feature_service.load(session, viewer.organization_id)
@@ -224,7 +243,10 @@ async def build_for(
     # своего языка нет вовсе, и рассылает её людям с разными настройками.
     locale = viewer.locale
     header = "<b>" + t("digest.title", locale, date=local.strftime("%d.%m")) + "</b>"
-    text = dashboard.render(board, header=header, locale=locale)
+    words = await accents(session, board, viewer) if accents else ""
+    text = dashboard.render(
+        board, header=header, locale=locale, intro=words or None
+    )
 
     if chiefs:
         block = ["", f"<b>{t('digest.chief_today', locale)}</b>"]
@@ -251,7 +273,12 @@ async def has_role(session: AsyncSession, user: User, code: RoleCode) -> bool:
     return found is not None
 
 
-async def send_digests(session: AsyncSession, now: datetime | None = None) -> int:
+async def send_digests(
+    session: AsyncSession,
+    now: datetime | None = None,
+    *,
+    accents: Accents | None = None,
+) -> int:
     """Один проход. Возвращает, сколько сводок поставлено в очередь.
 
     Запросы на человека здесь неизбежны: сводка по определению своя у каждого,
@@ -264,7 +291,9 @@ async def send_digests(session: AsyncSession, now: datetime | None = None) -> in
         if not due_now(now, viewer.timezone):
             continue
 
-        text, _ = await build_for(session, viewer=viewer, now=now)
+        text, _ = await build_for(
+            session, viewer=viewer, now=now, accents=accents
+        )
         if text is None:
             continue
 

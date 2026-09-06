@@ -15,9 +15,10 @@
 4. Выключенный ИИ не ломает ничего — и это проверяется первым.
 """
 import asyncio
+import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import delete, func, select
 
-from app.ai import gate, voice
+from app.ai import gate, summary, voice
 from app.ai.provider import Fake
 from app.core.config import settings
 from app.core.dates import parse_due
@@ -49,6 +50,8 @@ from app.models import (
     UserStatus,
     WorkingHours,
 )
+from app.services import digest
+from app.services import tasks as task_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
 from app.services.tasks import TaskError, allowed_assignees, may_assign_to
@@ -59,6 +62,11 @@ ORG_NAME = "ТЕСТ ИИ"
 # машины и сверенный с настоящим «завтра», проходит один день и падает на
 # следующий — такую проверку уже ловили в этом проекте.
 NOW = datetime(2026, 9, 7, 9, 0)
+
+# 07:30 по Ташкенту в тот же день — время, в которое уходит сводка.
+# В UTC, как её подаёт фоновый цикл: местное время здесь скрыло бы ошибку
+# «дата сервера вместо даты получателя».
+MORNING = datetime(2026, 9, 7, 2, 30, tzinfo=timezone.utc)
 
 passed = 0
 failed = 0
@@ -170,6 +178,7 @@ async def main() -> None:
         await stage_due(cast)
         await stage_confirm(cast)
         await stage_rights(cast)
+        await stage_digest(cast)
     finally:
         settings.ai_enabled = was_enabled
         gate.use(Fake())
@@ -732,6 +741,175 @@ async def stage_rights(cast: Cast) -> None:
     check(mine and denied.assignee_id == cast.worker, "своего — можно")
     check(not [n for n in denied.notes if n.startswith("voice.note.assignee")],
           "и пояснение про исполнителя убрано", str(denied.notes))
+
+
+async def _digest_of(cast: Cast, *, accents=None) -> tuple[str, object]:
+    """Собирает сводку руководителя. Без `accents` — та же, что была до ИИ."""
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        text, board = await digest.build_for(
+            session, viewer=chief, now=MORNING, accents=accents
+        )
+    return text or "", board
+
+
+async def stage_digest(cast: Cast) -> None:
+    print("\n11. Утренняя сводка словами: цифры подставляет система")
+
+    # День должен быть непустым: сводка «сегодня ничего» не рассылается вовсе.
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        worker = await session.get(User, cast.worker)
+        grants = await load_grants(session, chief)
+        for title in ("ТЕСТ Просроченное первое", "ТЕСТ Просроченное второе"):
+            await task_service.create_task(
+                session, creator=chief, assignee=worker, title=title,
+                due_at=MORNING - timedelta(days=3),
+            )
+        check(bool(grants), "права руководителя загружены")
+
+    print("\n11.1. Выключенный ИИ даёт нынешнюю сводку слово в слово")
+    settings.ai_enabled = False
+    fake = Fake(answers=["не должно прозвучать"])
+    gate.use(fake)
+    plain, board = await _digest_of(cast)
+    with_ai, _ = await _digest_of(cast, accents=summary.accents)
+    check(plain, "сводка собралась", plain[:50])
+    check(with_ai == plain, "письмо не изменилось ни на знак")
+    check(fake.calls == 0, "и модель никто не звал", str(fake.calls))
+
+    print("\n11.2. Метки берутся с того же экрана, что увидит человек")
+    values = summary.facts(board)
+    check(values.get("overdue") == str(board.overdue_total),
+          "просрочки взяты с экрана", str(values.get("overdue")))
+    name, count = board.overdue_by_department[0]
+    check(values.get("overdue_top_count") == str(count),
+          "и разбивка по отделу тоже", str(values.get("overdue_top_count")))
+    check(values.get("overdue_top") == name, "название отдела не переписано",
+          str(values.get("overdue_top")))
+    check(all(token in summary.MEANING for token in values),
+          "у каждой метки есть описание", str(set(values) - set(summary.MEANING)))
+    # Чего сегодня нет, о том модель и не узнает: перечисленный ноль
+    # она непременно упомянет.
+    check("meetings" not in values or board.meetings_today,
+          "нулевые значения в метки не попадают", str(values))
+
+    print("\n11.3. Годный ответ: числа подставлены, метки не остались")
+    settings.ai_enabled = True
+    good = (
+        "Bugun asosiy narsa — muddati oʻtgan topshiriqlar, ularning soni {overdue}.\n"
+        "Eng koʻpi {overdue_top} boʻlimida: {overdue_top_count}.\n"
+        "Kunni shulardan boshlagan maʼqul.\n"
+        "Qolgan ishlar kutib tura oladi."
+    )
+    gate.use(Fake(answers=[good]))
+    worded, _ = await _digest_of(cast, accents=summary.accents)
+    check(worded != plain, "вступление появилось")
+    check("{overdue}" not in worded and "{overdue_top}" not in worded,
+          "метка в письме не осталась", worded[:200])
+    check(str(board.overdue_total) in worded, "число просрочек подставлено")
+
+    # Каждая цифра во вступлении — из посчитанного. Сверка идёт по строкам,
+    # которых нет в обычной сводке: именно они и есть вступление.
+    known = set(plain.splitlines())
+    extra = [line for line in worded.splitlines() if line and line not in known]
+    seen = {found for line in extra for found in re.findall(r"\d+", line)}
+    allowed = {found for value in values.values() for found in re.findall(r"\d+", value)}
+    check(seen, "во вступлении есть числа", str(extra)[:80])
+    check(seen <= allowed, "и ни одного, которого никто не считал",
+          str(seen - allowed))
+    # Сама сводка при этом осталась целиком: вступление — добавка, а не замена.
+    body = plain.split("\n", 2)[2]
+    check(worded.endswith(body), "сводка с цифрами осталась нетронутой")
+
+    print("\n11.4. Цифру от модели письмо не принимает")
+    for name, answer in (
+        ("цифра в ответе",
+         "Bugun 7 ta topshiriq muddati oʻtgan.\nIkkinchi qator.\nUchinchi qator."),
+        ("выдуманная метка",
+         "Bugun {invented} ta ish bor.\nIkkinchi qator.\nUchinchi qator."),
+        ("метка про то, чего сегодня нет",
+         "Bugun {meetings} ta uchrashuv.\nIkkinchi qator.\nUchinchi qator."),
+        ("одна строка вместо нескольких", "Hammasi yaxshi."),
+        ("двадцать строк", "\n".join(f"Qator {chr(97 + i)}" for i in range(20))),
+        ("пустой ответ", "   "),
+    ):
+        gate.use(Fake(answers=[answer]))
+        got, _ = await _digest_of(cast, accents=summary.accents)
+        check(got == plain, f"{name}: ушла обычная сводка", got[:70])
+
+    print("\n11.5. Разметку от модели письмо не пропускает")
+    gate.use(Fake(answers=[
+        "<b>Diqqat</b> — {overdue} topshiriq.\nIkkinchi qator.\nUchinchi qator."
+    ]))
+    marked, _ = await _digest_of(cast, accents=summary.accents)
+    check("&lt;b&gt;Diqqat&lt;/b&gt;" in marked, "теги экранированы",
+          marked[:200])
+    check("<b>Diqqat</b>" not in marked, "и в письмо как разметка не попали")
+
+    print("\n11.6. Кириллица выводится правилом, а не просится у модели")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        chief.locale = "uz-Cyrl"
+    gate.use(Fake(answers=[good]))
+    cyrillic, _ = await _digest_of(cast, accents=summary.accents)
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        chief.locale = "uz"
+    check("boshlagan" not in cyrillic, "латиница из ответа модели не осталась",
+          cyrillic[:200])
+    check("бошлаган" in cyrillic, "строка переведена в кириллицу правилом",
+          cyrillic[:200])
+    check(str(board.overdue_total) in cyrillic,
+          "и подстановка пережила смену письменности")
+
+    print("\n11.7. Отказ модели не отменяет письма")
+    gate.use(Fake(fail=True))
+    broken, _ = await _digest_of(cast, accents=summary.accents)
+    check(broken == plain, "сводка ушла прежней", broken[:70])
+
+    async with session_scope() as session:
+        last = (await session.execute(
+            select(AiCall).where(
+                AiCall.organization_id == cast.org, AiCall.kind == "digest"
+            ).order_by(AiCall.id.desc()).limit(1)
+        )).scalar_one_or_none()
+        check(last is not None, "вызов записан в журнал")
+        check(last.prompt_version == summary.PROMPT_VERSION,
+              "с версией промпта сводки", str(last.prompt_version))
+        # Сводку никто не подтверждает: подтверждения здесь не требуется,
+        # и это не то же самое, что отказ.
+        check(last.confirmed is None, "подтверждения не требовалось",
+              str(last.confirmed))
+
+    print("\n11.8. Разбор ответа отдельно от письма")
+    ok = summary.usable("Bir qator.\nIkkinchi.\nUchinchi.", {})
+    check(ok is not None, "три строки без меток годятся", str(ok))
+    check(summary.usable("Bir 5 qator.\nIkki.\nUch.", {}) is None,
+          "цифра делает ответ негодным")
+    check(summary.usable("Bir {x}.\nIkki.\nUch.", {}) is None,
+          "неизвестная метка делает ответ негодным")
+    check(summary.usable("a" * 2000 + "\nIkki.\nUch.", {}) is None,
+          "слишком длинный ответ негоден")
+    # Вступление — добавка, а не часть экрана. Утверждение о самой отрисовке,
+    # а не сравнение двух её вызовов между собой: экран, который всегда вставлял
+    # бы пустое место, сравнение двух вызовов пропустило бы молча.
+    from app.services import dashboard as board_render
+
+    bare = board_render.render(board, locale="ru")
+    check("\n\n\n" not in bare, "без вступления лишнего пустого места нет")
+    check(board_render.render(board, locale="ru", intro=None) == bare,
+          "отсутствующее вступление ничего не меняет")
+    check(board_render.render(board, locale="ru", intro="") == bare,
+          "и пустое тоже")
+    check("ПРОБА" in board_render.render(board, locale="ru", intro="ПРОБА"),
+          "а написанное — ставится")
+
+    check(summary.fill("Bor {overdue} ta", {"overdue": "9"}) == "Bor 9 ta",
+          "подстановка на месте")
+    check(summary.fill("{who}", {"who": "<b>"}) == "&lt;b&gt;",
+          "значение тоже экранируется")
+    settings.ai_enabled = True
 
 
 if __name__ == "__main__":

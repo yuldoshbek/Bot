@@ -73,6 +73,9 @@ class Board:
 
     running: list[Meeting] = field(default_factory=list)
     ahead: list[Meeting] = field(default_factory=list)
+    # Сколько встреч сегодня всего. `ahead` обрезан до четырёх — по нему день
+    # не сосчитать, а «сколько сегодня встреч» спрашивают первым делом.
+    meetings_today: int = 0
     free_slot: slot_service.Slot | None = None
 
     requests_waiting: int = 0
@@ -139,6 +142,7 @@ async def build(
             .distinct()
         )
     ).scalars().all()
+    board.meetings_today = len(today)
     board.running = [m for m in today if m.start_at <= now < m.end_at]
     board.ahead = [m for m in today if m.start_at > now][:NEXT_MEETINGS]
 
@@ -248,7 +252,13 @@ async def build(
 
 
 # ── Отрисовка ───────────────────────────────────────────────────────────────
-def render(board: Board, *, header: str | None = None, locale: str | None = None) -> str:
+def render(
+    board: Board,
+    *,
+    header: str | None = None,
+    locale: str | None = None,
+    intro: str | None = None,
+) -> str:
     """Экран одним сообщением. Пустой блок не рисуется вовсе.
 
     Живёт в службе, а не в обработчике, потому что этот же текст уходит утренней
@@ -258,11 +268,20 @@ def render(board: Board, *, header: str | None = None, locale: str | None = None
     Порядок блоков повторяет порядок вопросов из критерия готовности: что
     сейчас, что дальше, что требует решения, что просрочено. Показатели идут
     последними — они объясняют, а не требуют действия.
+
+    `intro` — необязательное вступление словами (его пишет ИИ для утренней
+    сводки). Без него отрисовка ведёт себя в точности как раньше: экран
+    остаётся основным, а вступление — добавкой сверху, а не заменой.
     """
     tz = board.timezone
     local = to_local(board.day, tz)
     title = t("meeting.day.title", locale, date=local.strftime("%d.%m"))
     lines = [header or f"<b>{title}</b>", ""]
+    # Вступление, если его кто-то написал, — между заголовком и блоками.
+    # Сам экран о нём ничего не знает: без вступления он выглядит ровно так же,
+    # как выглядел, и это проверяется сравнением слово в слово.
+    if intro:
+        lines += [intro, ""]
 
     if board.running:
         lines.append(f"<b>{t('meeting.day.now', locale)}</b>")
