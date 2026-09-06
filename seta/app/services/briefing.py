@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.text import cut, esc
 from app.core.timeutil import to_local, utcnow
 from app.models import (
@@ -143,11 +144,14 @@ async def build(
     owner = shared.owner
     people = shared.people
 
+    # Досье читает тот, кому оно адресовано, — его язык и берём.
+    lang = viewer.locale
+    host = esc(owner.full_name) if owner else t("briefing.unknown", lang)
     lines = [
-        f"📋 <b>Через {BRIEF_MINUTES} минут</b>",
+        t("briefing.soon", lang, minutes=BRIEF_MINUTES),
         "",
         f"<b>{esc(meeting.title)}</b>",
-        f"🕐 {when}, ведёт {esc(owner.full_name) if owner else 'неизвестно'}",
+        f"🕐 {when}{t('briefing.hosted_by', lang, name=host)}",
     ]
     if len(people) > 1:
         # Сначала обрезаем, потом экранируем: обратный порядок режет строку
@@ -159,11 +163,11 @@ async def build(
     # видит и названием. Иначе досье само становилось бы утечкой.
     files = await document_service.for_meeting(session, meeting=meeting, viewer=viewer)
     if files:
-        lines += ["", "<b>Документы</b>"]
+        lines += ["", t("briefing.documents", lang)]
         lines += [f"📎 {esc(f.title or f.file_name)}" for f in files[:MAX_ITEMS]]
 
     if shared.decisions:
-        lines += ["", "<b>Незакрытые решения по этим людям</b>"]
+        lines += ["", t("briefing.open_decisions", lang)]
         for decision in shared.decisions:
             name = shared.responsible_names.get(decision.responsible_id or 0)
             who = f" — {esc(name)}" if name else ""

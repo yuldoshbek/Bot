@@ -381,7 +381,7 @@ async def main() -> None:
             )
             for i in range(40)
         ]
-        groups = group_messages(many)
+        groups = group_messages(many, "ru")
         check(len(groups) >= 3, f"сорок уведомлений разошлись на {len(groups)} сообщения")
         check(
             all(len(text) <= 4096 for _, text in groups),

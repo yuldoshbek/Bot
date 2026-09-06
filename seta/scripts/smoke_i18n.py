@@ -558,6 +558,13 @@ async def with_database() -> None:
         "app/services/quotas.py",
         "app/services/availability.py",
         "app/services/attendance.py",
+        "app/services/meetings.py",
+        "app/services/documents.py",
+        "app/services/templates.py",
+        "app/services/features.py",
+        "app/services/search.py",
+        "app/services/briefing.py",
+        "app/services/notifications.py",
     ]
     # Что остаётся по-русски намеренно — и почему. Список именно строк,
     # а не файлов: иначе исключение для одной подписи закрыло бы весь файл,
@@ -575,6 +582,11 @@ async def with_database() -> None:
         # Записи в журнале действий: их читает администратор в разделе аудита,
         # а не участник события.
         "эскалация: ", "файл",
+        # Строка не для экрана, а для разбора: срок из шаблона считается тем же
+        # разбором, что и набранный руками, и разбор понимает все языки.
+        "через ", " дней",
+        # Строка журнала работы, а не сообщение человеку.
+        "не доставлено пользователю %s: %s",
     }
 
     for module in DONE_MODULES:

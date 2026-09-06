@@ -43,6 +43,7 @@ from app.bot.handlers import (
 )
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.db import session_scope
+from app.core.i18n import t
 from app.core.timeutil import utcnow
 from app.models import (
     AuditLog,
@@ -1028,7 +1029,7 @@ async def main() -> None:
         if call[0] == "SendMessage"
     ]
     check(
-        any(features.OFF_MESSAGE in text for text in answers),
+        any(t("feature.off", "ru") in text for text in answers),
         "и ответил, что раздел выключен",
         str(answers[:1]),
     )

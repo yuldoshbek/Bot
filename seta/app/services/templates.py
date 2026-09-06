@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dates import parse_due
 from app.core.timeutil import utcnow
+from app.core.i18n import t
 from app.models import (
     Priority,
     RoleCode,
@@ -128,14 +129,14 @@ async def create(
     """Заводит шаблон. Заводить может тот, кто вправе создавать поручения."""
     title = (title or "").strip()
     if len(title) < 3:
-        return Outcome(reason="Нужно название шаблона — хотя бы три знака.")
+        return Outcome(reason=t("template.err.need_title", actor.locale))
     if not has_permission(grants, "task.create"):
-        return Outcome(reason="Заводить шаблоны может тот, кто ставит поручения.")
+        return Outcome(reason=t("template.err.create_rights", actor.locale))
 
     if assignee is not None and not await task_service.may_assign_to(
         session, actor=actor, grants=grants, assignee=assignee
     ):
-        return Outcome(reason="Этому сотруднику вы поручать не можете.")
+        return Outcome(reason=t("template.err.cannot_assign", actor.locale))
 
     # Десять нажатий «сохранить как шаблон» — это одно намерение, а не десять.
     # Каталог из десяти одинаковых «Еженедельных отчётов» бесполезен, поэтому
@@ -158,7 +159,7 @@ async def create(
     )
     if int(count or 0) >= MAX_TEMPLATES:
         return Outcome(
-            reason=f"Шаблонов уже {MAX_TEMPLATES}. Удалите ненужные, прежде чем заводить новый."
+            reason=t("template.err.too_many", actor.locale, count=MAX_TEMPLATES)
         )
 
     template = TaskTemplate(
@@ -196,7 +197,7 @@ async def from_task(
     человека ввести дважды то, что система знает.
     """
     if task.organization_id != actor.organization_id:
-        return Outcome(reason="Поручение другой организации.")
+        return Outcome(reason=t("template.err.other_org_task", actor.locale))
 
     days = 3
     if task.due_at is not None:
@@ -226,7 +227,7 @@ async def remove(
     а заготовка, и хранить отменённые заготовки незачем.
     """
     if not await may_edit(session, template=template, actor=actor):
-        return "Удалить шаблон может тот, кто его завёл, или администратор."
+        return t("template.err.remove_rights", actor.locale)
     await write_audit(
         session, actor_id=actor.id, action="template.delete",
         entity_type="task_template", entity_id=template.id,
@@ -254,15 +255,15 @@ async def apply(
     """
     now = now or utcnow()
     if template.organization_id != actor.organization_id:
-        return Outcome(reason="Шаблон другой организации.")
+        return Outcome(reason=t("template.err.other_org", actor.locale))
     if not has_permission(grants, "task.create"):
-        return Outcome(reason="Создавать поручения вам нельзя.")
+        return Outcome(reason=t("template.err.no_task_right", actor.locale))
 
     target = assignee
     if target is None and template.default_assignee_id:
         target = await session.get(User, template.default_assignee_id)
     if target is None:
-        return Outcome(reason="Не указано, кому поручить.")
+        return Outcome(reason=t("template.err.no_assignee", actor.locale))
 
     # Шаблон не обходит область права: исполнитель по умолчанию проверяется
     # так же, как выбранный вручную. Иначе шаблон, заведённый руководителем,
@@ -270,7 +271,7 @@ async def apply(
     if not await task_service.may_assign_to(
         session, actor=actor, grants=grants, assignee=target
     ):
-        return Outcome(reason="Этому сотруднику вы поручать не можете.")
+        return Outcome(reason=t("template.err.cannot_assign", actor.locale))
 
     # Проверка «нет ли уже такого» и создание — два действия, и между ними
     # успевает вклиниться второе нажатие: каждая транзакция не видит чужую

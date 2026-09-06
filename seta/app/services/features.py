@@ -15,22 +15,20 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.models import FeatureFlag, User
 from app.services.audit import write_audit
 
 # Что можно выключить. Список короткий намеренно: переключатель на каждую
 # кнопку превращает админку во второй исходник, в котором никто не разберётся.
+# Названия разделов — ключи словаря: их видит администратор на своём языке.
 FEATURES: dict[str, str] = {
-    "meetings": "Встречи и календарь",
-    "documents": "Документы и поиск по ним",
-    "templates": "Типовые поручения",
-    "analytics": "Показатели на экране руководителя",
-    "digest": "Утренняя сводка",
+    "meetings": "feature.meetings",
+    "documents": "feature.documents",
+    "templates": "feature.templates",
+    "analytics": "feature.analytics",
+    "digest": "feature.digest",
 }
-
-# Что человек видит вместо раздела. Не «ошибка», а объяснение: раздел закрыт
-# осознанно, и обращаться нужно к администратору, а не в поддержку.
-OFF_MESSAGE = "Этот раздел выключен администратором организации."
 
 
 @dataclass(slots=True)
@@ -83,9 +81,9 @@ async def switch(
 ) -> str | None:
     """Включает или выключает раздел. Возвращает причину отказа или None."""
     if code not in FEATURES:
-        return "Неизвестный раздел."
+        return t("feature.err.unknown", actor.locale)
     if actor.organization_id != organization_id:
-        return "Это другая организация."
+        return t("feature.err.other_org", actor.locale)
 
     flag = (
         await session.execute(
@@ -114,7 +112,12 @@ async def switch(
     return None
 
 
-async def switches(session: AsyncSession, organization_id: int) -> list[Switch]:
+async def switches(
+    session: AsyncSession, organization_id: int, locale: str | None = None
+) -> list[Switch]:
     """Все переключатели в порядке каталога — для экрана администратора."""
     state = await load(session, organization_id)
-    return [Switch(code=code, title=title, enabled=state[code]) for code, title in FEATURES.items()]
+    return [
+        Switch(code=code, title=t(key, locale), enabled=state[code])
+        for code, key in FEATURES.items()
+    ]

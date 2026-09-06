@@ -16,6 +16,7 @@ from datetime import datetime
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.timeutil import utcnow
 from app.models import (
     Decision,
@@ -70,7 +71,9 @@ class Upload:
         return self.document is not None
 
 
-def inspect_upload(file_name: str, size_bytes: int) -> str | None:
+def inspect_upload(
+    file_name: str, size_bytes: int, locale: str | None = None
+) -> str | None:
     """Проверки при приёме. Возвращает причину отказа или None.
 
     Расширение, размер и MIME — реальная первая линия. Антивирус, который
@@ -81,12 +84,12 @@ def inspect_upload(file_name: str, size_bytes: int) -> str | None:
     """
     name = (file_name or "").strip()
     if not name:
-        return "У файла нет имени."
+        return t("document.err.no_name", locale)
     extension = os.path.splitext(name.lower())[1]
     if extension in BLOCKED_EXTENSIONS:
-        return f"Файлы {extension} система не принимает."
+        return t("document.err.bad_format", locale, ext=extension)
     if size_bytes > MAX_STORE_BYTES:
-        return "Файл слишком большой даже для Telegram."
+        return t("document.err.too_big", locale)
     return None
 
 
@@ -119,15 +122,23 @@ async def store(
     """Принимает документ: проверяет, сохраняет метаданные, ставит в очередь."""
     grants = await load_grants(session, uploader)
     if not has_permission(grants, "file.upload"):
-        return Upload(reason="Загружать документы может сотрудник организации.")
+        return Upload(reason=t("document.err.upload_rights", uploader.locale))
 
-    problem = inspect_upload(file_name, size_bytes)
+    problem = inspect_upload(file_name, size_bytes, uploader.locale)
     if problem:
         return Upload(reason=problem)
 
-    for linked, label in ((meeting, "Встреча"), (task, "Поручение"), (decision, "Решение")):
+    linked_kinds = (
+        (meeting, "document.link.meeting"),
+        (task, "document.link.task"),
+        (decision, "document.link.decision"),
+    )
+    for linked, label_key in linked_kinds:
         if linked is not None and linked.organization_id != uploader.organization_id:
-            return Upload(reason=f"{label} из другой организации.")
+            return Upload(reason=t(
+                "document.err.other_org_link", uploader.locale,
+                kind=t(label_key, uploader.locale),
+            ))
 
     document = Document(
         organization_id=uploader.organization_id,
@@ -231,19 +242,19 @@ async def grant(
 ) -> str | None:
     """Открывает доступ человеку или отделу. Возвращает причину отказа или None."""
     if actor.organization_id != document.organization_id:
-        return "Документ другой организации."
+        return t("document.err.other_org", actor.locale)
     if to_user is None and to_department_id is None:
-        return "Не указано, кому открывать доступ."
+        return t("document.err.no_target", actor.locale)
     if to_user is not None and to_user.organization_id != document.organization_id:
-        return "Этот человек из другой организации."
+        return t("meeting.err.other_org_person", actor.locale)
 
     grants = await load_grants(session, actor)
     if not has_permission(grants, "file.share"):
-        return "Нет права выдавать доступ к документам."
+        return t("document.err.grant_rights", actor.locale)
     # Делиться можно своим документом; чужим — только с правом на всю
     # организацию: иначе один сотрудник открывал бы чужие файлы третьим лицам.
     if actor.id != document.uploaded_by and scope_of(grants, "file.share") != Scope.ORGANIZATION:
-        return "Открыть доступ может тот, кто загрузил документ."
+        return t("document.err.owner_only", actor.locale)
 
     exists = await session.scalar(
         select(DocumentAccess.id).where(
@@ -284,7 +295,7 @@ async def open_for(
     """
     now = now or utcnow()
     if not await may_read(session, document=document, viewer=viewer):
-        return "Этот документ вам не открыт."
+        return t("document.not_open", viewer.locale)
     session.add(DocumentView(
         document_id=document.id, user_id=viewer.id, channel=channel, viewed_at=now
     ))

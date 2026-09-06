@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dates import parse_hhmm
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import to_local, utcnow
 from app.models import (
@@ -51,6 +52,12 @@ from app.services.rbac import (
 
 # Меньше этого удерживать бессмысленно: человек не успеет даже прочитать заявку.
 MIN_HOLD_MINUTES = 30
+
+
+def _at(moment: datetime, tz_name: str | None, locale: str | None) -> str:
+    """«05.09 в 14:00» — предлог между датой и временем зависит от языка."""
+    date_part, time_part = to_local(moment, tz_name).strftime("%d.%m|%H:%M").split("|")
+    return t("common.date_at_time", locale, date=date_part, time=time_part)
 
 
 @dataclass
@@ -119,9 +126,9 @@ async def create_request(
     end_at = start_at + timedelta(minutes=duration_minutes)
 
     if start_at <= now:
-        return RequestOutcome(reason="Это время уже прошло.")
+        return RequestOutcome(reason=t("meeting.err.past", initiator.locale))
     if initiator.organization_id != owner.organization_id:
-        return RequestOutcome(reason="Этот человек из другой организации.")
+        return RequestOutcome(reason=t("meeting.err.other_org_person", initiator.locale))
 
     async def _alternatives() -> list[slot_service.Slot]:
         return await slot_service.free_slots(
@@ -133,7 +140,7 @@ async def create_request(
         session, owner=owner, start_at=start_at, end_at=end_at
     ):
         return RequestOutcome(
-            reason="Это время уже занято.", alternatives=await _alternatives()
+            reason=t("meeting.err.busy", initiator.locale), alternatives=await _alternatives()
         )
 
     # Проверка выше смотрит на состояние до нас, а решает — база. Между
@@ -174,10 +181,9 @@ async def create_request(
     except IntegrityError:
         await savepoint.rollback()
         return RequestOutcome(
-            reason="Это время только что заняли.", alternatives=await _alternatives()
+            reason=t("meeting.err.just_taken", initiator.locale), alternatives=await _alternatives()
         )
 
-    when = to_local(start_at, owner.timezone).strftime("%d.%m в %H:%M")
     await enqueue(
         session,
         user_id=owner.id,
@@ -186,10 +192,15 @@ async def create_request(
         kind="meeting.request",
         priority=NotificationPriority.NORMAL,
         body=(
-            f"📅 <b>Запрос встречи</b>\n\n{esc(title)}\n"
-            f"Кто: {esc(initiator.full_name)}\n"
-            f"Когда: {when} · {duration_minutes} мин"
-            + ("\n\n⚠️ Сверх лимита времени" if request.over_quota else "")
+            f"{t('meeting.notify.request', owner.locale)}\n\n{esc(title)}\n"
+            f"{t('meeting.notify.who', owner.locale)}: {esc(initiator.full_name)}\n"
+            f"{t('meeting.notify.when', owner.locale)}: "
+            f"{_at(request.start_at, owner.timezone, owner.locale)} · "
+            f"{t('meeting.request.duration', owner.locale, minutes=duration_minutes)}"
+            + (
+                "\n\n" + t("meeting.request.over_quota_short", owner.locale)
+                if request.over_quota else ""
+            )
         ),
         payload={"request_id": request.id},
         timezone_name=owner.timezone,
@@ -236,8 +247,12 @@ async def decline(
 
     initiator = await session.get(User, request.initiator_id)
     if initiator is not None:
-        when = to_local(request.start_at, initiator.timezone).strftime("%d.%m в %H:%M")
-        tail = f"\n\nПричина: {esc(request.decline_reason)}" if request.decline_reason else ""
+        lang = initiator.locale
+        when = _at(request.start_at, initiator.timezone, lang)
+        tail = (
+            f"\n\n{t('meeting.notify.reason', lang)}: {esc(request.decline_reason)}"
+            if request.decline_reason else ""
+        )
         await enqueue(
             session,
             user_id=initiator.id,
@@ -245,7 +260,10 @@ async def decline(
             event_key=f"meeting_request:{request.id}:declined",
             kind="meeting.request.declined",
             priority=NotificationPriority.NORMAL,
-            body=f"❌ <b>Встреча отклонена</b>\n\n{esc(request.title)}\nБыло: {when}{tail}",
+            body=(
+                f"{t('meeting.notify.declined', lang)}\n\n{esc(request.title)}\n"
+                f"{t('meeting.notify.was', lang)}: {when}{tail}"
+            ),
             payload={"request_id": request.id},
             timezone_name=initiator.timezone,
         )
@@ -287,7 +305,7 @@ async def expire_holds(session: AsyncSession, now: datetime | None = None) -> in
         initiator = await session.get(User, request.initiator_id)
         if initiator is None:
             continue
-        when = to_local(request.start_at, initiator.timezone).strftime("%d.%m в %H:%M")
+        when = _at(request.start_at, initiator.timezone, initiator.locale)
         await enqueue(
             session,
             user_id=initiator.id,
@@ -296,8 +314,10 @@ async def expire_holds(session: AsyncSession, now: datetime | None = None) -> in
             kind="meeting.request.expired",
             priority=NotificationPriority.NORMAL,
             body=(
-                f"⌛️ <b>Запрос без ответа</b>\n\n{esc(request.title)}\n"
-                f"Было: {when}\n\nОкно освободилось — можно выбрать другое время."
+                f"{t('meeting.notify.expired', initiator.locale)}\n\n"
+                f"{esc(request.title)}\n"
+                f"{t('meeting.notify.was', initiator.locale)}: {when}\n\n"
+                f"{t('meeting.notify.slot_free', initiator.locale)}"
             ),
             payload={"request_id": request.id},
             timezone_name=initiator.timezone,
@@ -376,8 +396,9 @@ async def _tell_everyone(
     *,
     key: str,
     kind: str,
-    header: str,
-    tail: str = "",
+    header_key: str,
+    reason: str = "",
+    reason_key: str = "meeting.notify.reason",
     priority: NotificationPriority = NotificationPriority.NORMAL,
     skip_id: int | None = None,
 ) -> int:
@@ -386,12 +407,16 @@ async def _tell_everyone(
     Ключ события общий для всех, различается только получателем: повторное
     нажатие кнопки не рассылает второй круг писем, за это отвечает
     уникальность `event_key` в схеме.
+
+    Заголовок и причина собираются внутри цикла, по разу на участника: у людей
+    в одной встрече языки разные, и один готовый текст на всех показал бы
+    половине из них чужой.
     """
     sent = 0
     for person in await participants_of(session, meeting):
         if person.id == skip_id:
             continue
-        when = to_local(meeting.start_at, person.timezone).strftime("%d.%m в %H:%M")
+        when = _at(meeting.start_at, person.timezone, person.locale)
         created = await enqueue(
             session,
             user_id=person.id,
@@ -399,7 +424,14 @@ async def _tell_everyone(
             event_key=f"{key}:u{person.id}",
             kind=kind,
             priority=priority,
-            body=f"{header}\n\n{esc(meeting.title)}\nКогда: {when}{tail}",
+            body=(
+                f"{t(header_key, person.locale)}\n\n{esc(meeting.title)}\n"
+                f"{t('meeting.notify.when', person.locale)}: {when}"
+                + (
+                    f"\n\n{t(reason_key, person.locale)}: {esc(reason)}"
+                    if reason else ""
+                )
+            ),
             payload={"meeting_id": meeting.id},
             timezone_name=person.timezone,
         )
@@ -417,14 +449,14 @@ async def approve(
     """Подтверждает заявку и превращает её во встречу."""
     now = now or utcnow()
     if request.status != RequestStatus.NEW:
-        return Result(reason="Решение по этой заявке уже принято.")
+        return Result(reason=t("meeting.err.request_decided", actor.locale))
     if actor.organization_id != request.organization_id:
-        return Result(reason="Заявка другой организации.")
+        return Result(reason=t("meeting.err.other_org_request", actor.locale))
     if not await _may(
         session, actor, "meeting.approve",
         owner_id=request.owner_id, related={request.initiator_id},
     ):
-        return Result(reason="Подтверждать встречи может руководитель или его ассистент.")
+        return Result(reason=t("meeting.err.approve_rights", actor.locale))
 
     # Удержание защищало окно от заявок, но не от встречи, созданной напрямую.
     # Решает база: пересечение в календаре владельца физически невозможно.
@@ -445,7 +477,7 @@ async def approve(
         await session.flush()
     except IntegrityError:
         await savepoint.rollback()
-        return Result(reason="Это время в календаре уже занято другой встречей.")
+        return Result(reason=t("meeting.err.calendar_busy", actor.locale))
 
     for user_id, role in (
         (request.owner_id, ParticipantRole.ORGANIZER),
@@ -466,7 +498,7 @@ async def approve(
         session, meeting,
         key=f"meeting:{meeting.id}:confirmed",
         kind="meeting.confirmed",
-        header="✅ <b>Встреча подтверждена</b>",
+        header_key="meeting.notify.approved",
     )
     await write_audit(
         session, actor_id=actor.id, action="meeting.request.approve",
@@ -493,31 +525,31 @@ async def reschedule(
     now = now or utcnow()
     reason = (reason or "").strip()
     if not reason:
-        return Result(reason="Нужна причина переноса — её увидят все участники.")
+        return Result(reason=t("meeting.err.need_move_reason", actor.locale))
     if meeting.status == MeetingStatus.CANCELLED:
-        return Result(reason="Встреча отменена, переносить нечего.")
+        return Result(reason=t("meeting.err.cancelled_nothing_to_move", actor.locale))
     if actor.organization_id != meeting.organization_id:
-        return Result(reason="Встреча другой организации.")
+        return Result(reason=t("meeting.err.other_org_meeting", actor.locale))
 
     people = await participants_of(session, meeting)
     if not await _may(
         session, actor, "meeting.reschedule",
         owner_id=meeting.owner_id, related={p.id for p in people},
     ):
-        return Result(reason="Переносить встречу может руководитель или его ассистент.")
+        return Result(reason=t("meeting.err.move_rights", actor.locale))
 
     duration = meeting.end_at - meeting.start_at
     new_end = new_start + duration
     if new_start <= now:
-        return Result(reason="Это время уже прошло.")
+        return Result(reason=t("meeting.err.past", actor.locale))
     owner = await session.get(User, meeting.owner_id)
     if owner is None:
-        return Result(reason="Владелец календаря не найден.")
+        return Result(reason=t("meeting.err.no_owner", actor.locale))
     if not await slot_service.is_free(
         session, owner=owner, start_at=new_start, end_at=new_end,
         exclude_meeting_id=meeting.id,
     ):
-        return Result(reason="В это время у руководителя уже что-то стоит.")
+        return Result(reason=t("meeting.err.owner_busy", actor.locale))
 
     savepoint = await session.begin_nested()
     try:
@@ -527,7 +559,7 @@ async def reschedule(
         await session.flush()
     except IntegrityError:
         await savepoint.rollback()
-        return Result(reason="Это время только что заняли.")
+        return Result(reason=t("meeting.err.just_taken", actor.locale))
 
     # Номер переноса в ключе: второй перенос — это новое событие, о нём
     # обязаны сообщить. Без версии повтор считался бы уже отправленным.
@@ -535,8 +567,8 @@ async def reschedule(
         session, meeting,
         key=f"meeting:{meeting.id}:moved:{meeting.reschedule_count}",
         kind="meeting.rescheduled",
-        header="🔄 <b>Встреча перенесена</b>",
-        tail=f"\n\nПричина: {esc(reason)}",
+        header_key="meeting.notify.moved",
+        reason=reason,
     )
     await write_audit(
         session, actor_id=actor.id, action="meeting.reschedule",
@@ -558,18 +590,18 @@ async def cancel(
     now = now or utcnow()
     reason = (reason or "").strip()
     if not reason:
-        return Result(reason="Нужна причина отмены — её увидят все участники.")
+        return Result(reason=t("meeting.err.need_cancel_reason", actor.locale))
     if meeting.status == MeetingStatus.CANCELLED:
-        return Result(reason="Встреча уже отменена.")
+        return Result(reason=t("meeting.err.already_cancelled", actor.locale))
     if actor.organization_id != meeting.organization_id:
-        return Result(reason="Встреча другой организации.")
+        return Result(reason=t("meeting.err.other_org_meeting", actor.locale))
 
     people = await participants_of(session, meeting)
     if not await _may(
         session, actor, "meeting.cancel",
         owner_id=meeting.owner_id, related={p.id for p in people},
     ):
-        return Result(reason="Отменять встречу может руководитель или его ассистент.")
+        return Result(reason=t("meeting.err.cancel_rights", actor.locale))
 
     meeting.status = MeetingStatus.CANCELLED
     meeting.cancelled_at = now
@@ -580,8 +612,8 @@ async def cancel(
         session, meeting,
         key=f"meeting:{meeting.id}:cancelled",
         kind="meeting.cancelled",
-        header="🚫 <b>Встреча отменена</b>",
-        tail=f"\n\nПричина: {esc(reason)}",
+        header_key="meeting.notify.cancelled",
+        reason=reason,
     )
     await write_audit(
         session, actor_id=actor.id, action="meeting.cancel",
@@ -609,13 +641,13 @@ async def quick(
     now = now or utcnow()
     title = (title or "").strip()
     if not title:
-        return Result(reason="Нужна тема совещания.")
+        return Result(reason=t("meeting.err.need_topic", organizer.locale))
     if start_at <= now:
-        return Result(reason="Это время уже прошло.")
+        return Result(reason=t("meeting.err.past", organizer.locale))
     if not await _may(
         session, organizer, "meeting.create", owner_id=organizer.id
     ):
-        return Result(reason="Нет права создавать встречи.")
+        return Result(reason=t("meeting.err.no_create_right", organizer.locale))
 
     end_at = start_at + timedelta(minutes=duration_minutes)
     people = list(
@@ -629,7 +661,7 @@ async def quick(
         ).scalars().all()
     )
     if not people:
-        return Result(reason="Некого собирать: участники не найдены в вашей организации.")
+        return Result(reason=t("meeting.err.nobody_found", organizer.locale))
 
     savepoint = await session.begin_nested()
     try:
@@ -646,7 +678,7 @@ async def quick(
         await session.flush()
     except IntegrityError:
         await savepoint.rollback()
-        return Result(reason="В это время у вас уже стоит другая встреча.")
+        return Result(reason=t("meeting.err.you_busy", organizer.locale))
 
     session.add(MeetingParticipant(
         meeting_id=meeting.id, user_id=organizer.id,
@@ -663,8 +695,10 @@ async def quick(
         session, meeting,
         key=f"meeting:{meeting.id}:called",
         kind="meeting.quick",
-        header="📣 <b>Срочное совещание</b>",
-        tail=f"\n\nСобирает: {esc(organizer.full_name)}",
+        header_key="meeting.notify.urgent",
+        # Подпись у этой строки другая: не «причина», а «собирает».
+        reason=organizer.full_name,
+        reason_key="meeting.notify.gathers",
         priority=NotificationPriority.CRITICAL,
         skip_id=organizer.id,
     )
@@ -691,20 +725,20 @@ async def finish(
     """
     now = now or utcnow()
     if actor.organization_id != meeting.organization_id:
-        return Result(reason="Встреча другой организации.")
+        return Result(reason=t("meeting.err.other_org_meeting", actor.locale))
     if meeting.status == MeetingStatus.CANCELLED:
-        return Result(reason="Встреча отменена, завершать нечего.")
+        return Result(reason=t("meeting.err.cancelled_nothing_to_finish", actor.locale))
     if meeting.status == MeetingStatus.FINISHED:
-        return Result(reason="Встреча уже завершена.")
+        return Result(reason=t("meeting.err.already_finished", actor.locale))
     if now < meeting.start_at:
-        return Result(reason="Встреча ещё не началась.")
+        return Result(reason=t("meeting.err.not_started", actor.locale))
 
     people = await participants_of(session, meeting)
     if not await _may(
         session, actor, "meeting.finish",
         owner_id=meeting.owner_id, related={p.id for p in people},
     ):
-        return Result(reason="Завершить встречу может организатор или его ассистент.")
+        return Result(reason=t("meeting.err.finish_rights", actor.locale))
 
     meeting.status = MeetingStatus.FINISHED
     meeting.finished_at = now

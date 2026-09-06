@@ -962,11 +962,11 @@ async def main() -> None:
         # рассылка с тем же ключом события не должна создать ни одного письма.
         first = await meetings._tell_everyone(
             session, target, key=f"meeting:{double_id}:probe",
-            kind="meeting.probe", header="Проверка",
+            kind="meeting.probe", header_key="meeting.notify.approved",
         )
         second = await meetings._tell_everyone(
             session, target, key=f"meeting:{double_id}:probe",
-            kind="meeting.probe", header="Проверка",
+            kind="meeting.probe", header_key="meeting.notify.approved",
         )
         check(first == 2, "первая рассылка дошла до обоих", f"писем: {first}")
         check(second == 0, "повторная с тем же ключом не создаёт ничего", f"писем: {second}")
