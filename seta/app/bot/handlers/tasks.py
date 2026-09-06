@@ -746,30 +746,9 @@ def _priority_kb(locale: str) -> InlineKeyboardMarkup:
 async def _allowed_assignees(
     session: AsyncSession, user: User, grants: dict[str, Grant]
 ) -> list[User]:
-    """Кому этот человек вправе поручать.
-
-    Право task.create есть и у рядового сотрудника, но с областью «только свои».
-    Без учёта области список кандидатов включал бы всю организацию, и сотрудник
-    мог бы назначить поручение руководителю.
-    """
-    scope = grants["task.create"].scope
-    query = select(User).where(
-        User.organization_id == user.organization_id,
-        User.status == UserStatus.ACTIVE,
-    )
-
-    if scope == "SELF":
-        query = query.where(User.id == user.id)
-    elif scope == "DEPARTMENT":
-        visible = await visible_department_ids(session, user)
-        if not visible:
-            return []
-        query = query.where(User.department_id.in_(visible))
-    elif scope == "SUBORDINATES":
-        query = query.where(User.manager_id == user.id)
-
-    rows = await session.execute(query.order_by(User.full_name).limit(20))
-    return list(rows.scalars().all())
+    """Кому этот человек вправе поручать. Правило живёт в службе: тот же список
+    нужен голосовому поручению, и двух описаний одного права быть не должно."""
+    return await service.allowed_assignees(session, actor=user, grants=grants)
 
 
 async def _may_assign_to(

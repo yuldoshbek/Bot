@@ -16,7 +16,8 @@
 """
 import asyncio
 import sys
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,14 +25,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import delete, func, select
 
-from app.ai import gate
+from app.ai import gate, voice
 from app.ai.provider import Fake
 from app.core.config import settings
+from app.core.dates import parse_due
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
-from app.models import AiCall, Decision, Organization, Task, User, UserStatus
+from app.models import (
+    AiCall,
+    AuditLog,
+    Decision,
+    Department,
+    Notification,
+    Organization,
+    Priority,
+    RoleCode,
+    Task,
+    TaskComment,
+    TaskEvent,
+    TaskExtension,
+    User,
+    UserRole,
+    UserStatus,
+    WorkingHours,
+)
+from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
+from app.services.rbac import load_grants
+from app.services.tasks import TaskError, allowed_assignees, may_assign_to
 
 ORG_NAME = "ТЕСТ ИИ"
+
+# Точка отсчёта для сроков. Пришпилена намеренно: срок, посчитанный от часов
+# машины и сверенный с настоящим «завтра», проходит один день и падает на
+# следующий — такую проверку уже ловили в этом проекте.
+NOW = datetime(2026, 9, 7, 9, 0)
 
 passed = 0
 failed = 0
@@ -48,42 +75,89 @@ def check(condition: bool, title: str, detail: str = "") -> None:
 
 
 async def cleanup() -> None:
+    """Убирает за собой. Только по organization_id — чужого не трогаем никогда."""
     async with session_scope() as session:
         org_ids = list((await session.execute(
             select(Organization.id).where(Organization.name == ORG_NAME)
         )).scalars().all())
         if not org_ids:
             return
-        # Только по organization_id: чужие записи не трогаем никогда.
+        user_ids = list((await session.execute(
+            select(User.id).where(User.organization_id.in_(org_ids))
+        )).scalars().all())
+        task_ids = list((await session.execute(
+            select(Task.id).where(Task.organization_id.in_(org_ids))
+        )).scalars().all())
+
         await session.execute(delete(AiCall).where(AiCall.organization_id.in_(org_ids)))
-        await session.execute(delete(Task).where(Task.organization_id.in_(org_ids)))
+        if task_ids:
+            for model in (TaskEvent, TaskComment, TaskExtension):
+                await session.execute(delete(model).where(model.task_id.in_(task_ids)))
+            await session.execute(delete(Task).where(Task.id.in_(task_ids)))
         await session.execute(
             delete(Decision).where(Decision.organization_id.in_(org_ids))
         )
-        await session.execute(delete(User).where(User.organization_id.in_(org_ids)))
+        if user_ids:
+            for model in (UserRole, WorkingHours, Notification):
+                await session.execute(delete(model).where(model.user_id.in_(user_ids)))
+            await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(user_ids)))
+            await session.execute(delete(User).where(User.id.in_(user_ids)))
         await session.execute(
-            delete(Organization).where(Organization.id.in_(org_ids))
+            delete(Department).where(Department.organization_id.in_(org_ids))
         )
+        await session.execute(delete(Organization).where(Organization.id.in_(org_ids)))
 
 
-async def seed() -> tuple[int, int]:
+@dataclass(slots=True)
+class Cast:
+    """Кто участвует в проверках. Роли настоящие: голосовое поручение обязано
+    упереться в те же права, что и набранное руками."""
+
+    org: int
+    chief: int       # руководитель — поручает кому угодно
+    worker: int      # сотрудник — область «только свои»
+    outsider: int    # сотрудник другого отдела
+    twins: int       # два однофамильца: имя, по которому нельзя выбрать
+
+
+async def seed() -> Cast:
     async with session_scope() as session:
+        await bootstrap(session)
         org = Organization(name=ORG_NAME, timezone="Asia/Tashkent")
         session.add(org)
         await session.flush()
-        person = User(
-            organization_id=org.id, telegram_user_id=993_001,
-            full_name="ТЕСТ Rahbar", status=UserStatus.ACTIVE,
-            timezone="Asia/Tashkent", locale="uz",
-        )
-        session.add(person)
+
+        finance = Department(organization_id=org.id, name="ТЕСТ Moliya")
+        projects = Department(organization_id=org.id, name="ТЕСТ Loyihalar")
+        session.add_all([finance, projects])
         await session.flush()
-        return org.id, person.id
+
+        async def person(name, role, department=None, tg=0) -> User:
+            item = User(
+                organization_id=org.id, telegram_user_id=tg, full_name=name,
+                status=UserStatus.ACTIVE, timezone="Asia/Tashkent", locale="uz",
+                department_id=department.id if department else None,
+            )
+            session.add(item)
+            await session.flush()
+            await ensure_default_working_hours(session, item)
+            await grant_role(session, item, role)
+            return item
+
+        chief = await person("ТЕСТ Rahimov Rahbar", RoleCode.EXECUTIVE, tg=993_001)
+        worker = await person("ТЕСТ Karimov Ijrochi", RoleCode.EMPLOYEE, finance, 993_002)
+        outsider = await person("ТЕСТ Yusupov Boshqa", RoleCode.EMPLOYEE, projects, 993_003)
+        # Однофамильцы: по фамилии выбрать нельзя, и система обязана это сказать,
+        # а не взять первого попавшегося.
+        await person("ТЕСТ Salimov Bir", RoleCode.EMPLOYEE, finance, 993_004)
+        await person("ТЕСТ Salimov Ikki", RoleCode.EMPLOYEE, finance, 993_005)
+        return Cast(org.id, chief.id, worker.id, outsider.id, 2)
 
 
 async def main() -> None:
     await cleanup()
-    org_id, user_id = await seed()
+    cast = await seed()
+    org_id, user_id = cast.org, cast.chief
     was_enabled = settings.ai_enabled
     try:
         await stage_off(org_id, user_id)
@@ -91,6 +165,11 @@ async def main() -> None:
         await stage_budget(org_id, user_id)
         await stage_no_writes(org_id, user_id)
         await stage_provider(org_id, user_id)
+        stage_payload()
+        await stage_draft(cast)
+        await stage_due(cast)
+        await stage_confirm(cast)
+        await stage_rights(cast)
     finally:
         settings.ai_enabled = was_enabled
         gate.use(Fake())
@@ -337,6 +416,322 @@ async def stage_provider(org_id: int, user_id: int) -> None:
     # Слой подмены: ни один сценарий этого набора не ходил в сеть.
     check(gate.current().name == "fake",
           "все проверки прошли на подставном поставщике", gate.current().name)
+
+
+async def count_tasks(org_id: int) -> int:
+    async with session_scope() as session:
+        return await session.scalar(
+            select(func.count(Task.id)).where(Task.organization_id == org_id)
+        )
+
+
+def stage_payload() -> None:
+    print("\n6. Ответ модели разбирается по заранее заданным полям")
+    # Поля перечислены в коде. Всё, что модель придумала сверх списка,
+    # не должно доехать никуда: это и есть «структура, а не текст запроса».
+    clean = voice.payload(
+        '{"title":"Смету","assignee":"Karimov","due":"ertaga","priority":"high"}'
+    )
+    check(clean.get("title") == "Смету", "название разобрано", str(clean))
+    check(clean.get("due") == "ertaga", "фрагмент срока разобран", str(clean))
+
+    fenced = voice.payload('Готово:\n```json\n{"title":"А","due":"завтра"}\n```\nвсё')
+    check(fenced == {"title": "А", "due": "завтра"},
+          "JSON достаётся из разметки и болтовни вокруг", str(fenced))
+
+    extra = voice.payload('{"title":"А","secret":"1","sql":"DROP TABLE tasks"}')
+    check(extra == {"title": "А"}, "поля вне списка отброшены", str(extra))
+
+    check(voice.payload("совсем не json") == {},
+          "ответ не по форме — пустота, а не исключение")
+    check(voice.payload('["a","b"]') == {}, "не словарь — пустота")
+    check(voice.payload("") == {}, "пустой ответ — пустота")
+
+    long = voice.payload('{"title":"' + "я" * 900 + '"}')
+    check(len(long.get("title", "")) <= 400, "слишком длинное поле обрезано",
+          str(len(long.get("title", ""))))
+
+    # Приоритет — из перечня, а не из фантазии: незнакомое слово даёт обычный.
+    check(voice.PRIORITIES.get("critical") == Priority.CRITICAL,
+          "перечень приоритетов на месте")
+    check("выдумка" not in voice.PRIORITIES, "выдуманного приоритета в перечне нет")
+
+
+async def stage_draft(cast: Cast) -> None:
+    print("\n7. Черновик не создаёт поручения")
+    settings.ai_enabled = True
+    gate.use(Fake(answers=[
+        '{"title":"Smeta tayyorlash","assignee":"Karimov",'
+        '"due":"ertaga","priority":"high"}'
+    ]))
+    spoken = "Karimovga smeta tayyorlashni topshir, ertaga"
+
+    before = await count_tasks(cast.org)
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        draft = await voice.draft(
+            session, spoken, creator=chief, grants=grants, now=NOW
+        )
+        call = await session.get(AiCall, draft.call_id)
+        check(call is not None and call.kind == "voice_task",
+              "вызов записан как голосовое поручение")
+        check(call.prompt_version == voice.PROMPT_VERSION,
+              "версия промпта записана", str(call.prompt_version))
+        check(call.confirmed is False,
+              "подтверждения ещё не было", str(call.confirmed))
+    after = await count_tasks(cast.org)
+
+    check(after == before, "поручений не прибавилось", f"{before} → {after}")
+    check(draft.title == "Smeta tayyorlash", "название взято из разбора", draft.title)
+    check(draft.assignee_id == cast.worker, "исполнителя нашла система",
+          str(draft.assignee_id))
+    check(draft.priority == Priority.HIGH, "приоритет разобран", str(draft.priority))
+    check(draft.ready, "черновик готов к подтверждению", str(draft.notes))
+
+    print("\n7.1. Названного человека ищет система, а не модель")
+    gate.use(Fake(answers=['{"title":"Ish","assignee":"Salimov"}']))
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        many = await voice.draft(
+            session, "Salimovga topshir", creator=chief, grants=grants, now=NOW
+        )
+    check(many.assignee_id is None, "по однофамильцам никто не выбран",
+          str(many.assignee_id))
+    check("voice.note.assignee_many" in many.notes, "и сказано почему",
+          str(many.notes))
+    check(not many.ready, "такой черновик к записи не готов")
+
+    gate.use(Fake(answers=['{"title":"Ish","assignee":"Petrov"}']))
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        unknown = await voice.draft(
+            session, "Petrovga topshir", creator=chief, grants=grants, now=NOW
+        )
+    check(unknown.assignee_id is None, "выдуманного человека система не завела")
+    check("voice.note.assignee_unknown" in unknown.notes, "и сказано, что не нашла",
+          str(unknown.notes))
+
+    print("\n7.2. Выключенный ИИ не ломает разбор — он его упрощает")
+    settings.ai_enabled = False
+    fake = Fake(answers=['{"title":"не должно прозвучать"}'])
+    gate.use(fake)
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        plain = await voice.draft(
+            session, "Ertaga hisobot tayyorlash", creator=chief, grants=grants, now=NOW
+        )
+    check(fake.calls == 0, "модель не звали", str(fake.calls))
+    check(plain.title == "Ertaga hisobot tayyorlash", "речь стала названием как есть",
+          plain.title)
+    check("voice.note.raw" in plain.notes, "и об этом сказано", str(plain.notes))
+    # Главное: срок посчитан всё равно — считает его система, а не модель.
+    check(plain.due_at == parse_due("ertaga", "Asia/Tashkent", now=NOW),
+          "срок посчитан без ИИ", str(plain.due_at))
+    settings.ai_enabled = True
+
+
+async def stage_due(cast: Cast) -> None:
+    print("\n8. Срок считает parse_due, а не модель")
+    settings.ai_enabled = True
+
+    async def draft_of(answer: str, spoken: str):
+        gate.use(Fake(answers=[answer]))
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            grants = await load_grants(session, chief)
+            return await voice.draft(
+                session, spoken, creator=chief, grants=grants, now=NOW
+            )
+
+    # Модель подсовывает вычисленную дату вместо фрагмента речи. Взять её
+    # значило бы завести второе описание сроков — и вот оно уже врёт.
+    lying = await draft_of(
+        '{"title":"Hisobot","assignee":"Karimov","due":"2026-12-31"}',
+        "Karimovga hisobot, ertaga",
+    )
+    check(lying.due_at == parse_due("ertaga", "Asia/Tashkent", now=NOW),
+          "срок взят из речи, а не из ответа модели", str(lying.due_at))
+    check(lying.due_at.month == 9, "декабрь из ответа модели не попал в срок",
+          str(lying.due_at))
+
+    # Честный ответ: фрагмент речи. Результат обязан совпасть с тем, что дал бы
+    # тот же разбор на том же тексте — это и есть «одна функция на два входа».
+    for phrase, spoken in (
+        ("ertaga", "Karimovga hisobot, ertaga"),
+        ("juma gacha", "Karimovga hisobot, juma gacha"),
+        ("через три дня", "Каримову отчёт, через три дня"),
+    ):
+        item = await draft_of(
+            '{"title":"Hisobot","assignee":"Karimov","due":"%s"}' % phrase, spoken
+        )
+        expected = parse_due(phrase, "Asia/Tashkent", now=NOW)
+        check(item.due_at == expected, f"«{phrase}»: срок совпал с parse_due",
+              f"{item.due_at} vs {expected}")
+
+    # Сверка с посчитанной датой, а не с той же функцией. Сравнение
+    # `parse_due` с `parse_due` молчало бы даже тогда, когда разбор перестал
+    # понимать срок вовсе: обе стороны дали бы None и сошлись.
+    tomorrow = parse_due("ertaga", "Asia/Tashkent", now=NOW)
+    check(tomorrow is not None and tomorrow.date() == (NOW + timedelta(days=1)).date(),
+          "«ertaga» — это завтра, а не пустота", str(tomorrow))
+
+    # Числительные словами: продиктованный срок звучит словами почти всегда,
+    # и расшифровка записывает их словами же.
+    three = parse_due("через три дня", "Asia/Tashkent", now=NOW)
+    check(three is not None and three.date() == (NOW + timedelta(days=3)).date(),
+          "«через три дня» разобрано в дату", str(three))
+    check(parse_due("uch kundan keyin", "Asia/Tashkent", now=NOW) == three,
+          "и по-узбекски — та же дата")
+    check(parse_due("икки ҳафта ичида", "Asia/Tashkent", now=NOW) is not None,
+          "и кириллицей тоже")
+
+    # Срок не назван вовсе — это не ошибка, а поручение без срока.
+    none = await draft_of('{"title":"Hisobot","assignee":"Karimov"}', "Karimovga hisobot")
+    check(none.due_at is None, "без срока — без срока", str(none.due_at))
+    check("voice.note.no_due" in none.notes, "и об этом сказано", str(none.notes))
+    check(none.ready, "но записать такое поручение можно")
+
+
+async def stage_confirm(cast: Cast) -> None:
+    print("\n9. Подтверждение создаёт ровно одно, отказ — ни одного")
+    settings.ai_enabled = True
+    answer = ('{"title":"Smeta tayyorlash","assignee":"Karimov",'
+              '"due":"ertaga","priority":"normal"}')
+    spoken = "Karimovga smeta tayyorlashni topshir, ertaga"
+
+    print("\n9.1. Отказ")
+    gate.use(Fake(answers=[answer]))
+    before = await count_tasks(cast.org)
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        draft = await voice.draft(session, spoken, creator=chief, grants=grants, now=NOW)
+        await voice.decline(session, draft)
+        call = await session.get(AiCall, draft.call_id)
+        check(call.confirmed is False, "в журнале записан отказ", str(call.confirmed))
+    after = await count_tasks(cast.org)
+    check(after == before, "после отказа не создано ничего", f"{before} → {after}")
+
+    print("\n9.2. Подтверждение")
+    gate.use(Fake(answers=[answer]))
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        draft = await voice.draft(session, spoken, creator=chief, grants=grants, now=NOW)
+        task = await voice.confirm(session, draft, creator=chief, grants=grants)
+        task_id, call_id = task.id, draft.call_id
+    created = await count_tasks(cast.org)
+    check(created == before + 1, "создано ровно одно поручение",
+          f"{before} → {created}")
+
+    async with session_scope() as session:
+        task = await session.get(Task, task_id)
+        call = await session.get(AiCall, call_id)
+        check(task.assignee_id == cast.worker, "исполнитель тот, кого выбрала система")
+        check(task.creator_id == cast.chief, "автор — человек, а не модель")
+        check(task.due_at == parse_due("ertaga", "Asia/Tashkent", now=NOW),
+              "срок тот же, что был в черновике", str(task.due_at))
+        # Расшифровка остаётся в описании: спорить о формулировке потом
+        # будут с ней, а не с пересказом модели.
+        check(task.description == spoken, "расшифровка сохранена в описании",
+              str(task.description))
+        check(call.confirmed is True, "в журнале записано подтверждение",
+              str(call.confirmed))
+
+
+async def stage_rights(cast: Cast) -> None:
+    print("\n10. Чужого исполнителя отвергает система, а не модель")
+    settings.ai_enabled = True
+
+    # Рядовой сотрудник: право task.create есть, область — «только свои».
+    gate.use(Fake(answers=['{"title":"Ish qilish","assignee":"Yusupov"}']))
+    async with session_scope() as session:
+        worker = await session.get(User, cast.worker)
+        grants = await load_grants(session, worker)
+        denied = await voice.draft(
+            session, "Yusupovga topshir", creator=worker, grants=grants, now=NOW
+        )
+    check(denied.assignee_id is None, "названный человек не подставлен",
+          str(denied.assignee_id))
+    check("voice.note.assignee_denied" in denied.notes, "причина названа",
+          str(denied.notes))
+    check(not denied.ready, "и черновик к записи не готов")
+
+    # Проверка не «всегда нет»: себе тот же человек поручить вправе.
+    gate.use(Fake(answers=['{"title":"Ish qilish","assignee":"Karimov"}']))
+    async with session_scope() as session:
+        worker = await session.get(User, cast.worker)
+        grants = await load_grants(session, worker)
+        allowed = await voice.draft(
+            session, "Karimovga topshir", creator=worker, grants=grants, now=NOW
+        )
+    check(allowed.assignee_id == cast.worker,
+          "себе поручить можно — отказ не безусловный", str(allowed.assignee_id))
+
+    print("\n10.2. Список и поштучная проверка — одно правило с двух сторон")
+    # Голосовой черновик предлагает выбрать из списка, а записывает после
+    # поштучной проверки. Разойдись они — в списке оказался бы человек,
+    # которому поручить всё равно не дадут, и кнопка отказывала бы после нажатия.
+    async with session_scope() as session:
+        everyone = list((await session.execute(
+            select(User).where(
+                User.organization_id == cast.org, User.status == UserStatus.ACTIVE
+            )
+        )).scalars().all())
+        for who, title in ((cast.chief, "руководителя"), (cast.worker, "сотрудника")):
+            actor = await session.get(User, who)
+            grants = await load_grants(session, actor)
+            listed = {
+                person.id
+                for person in await allowed_assignees(session, actor=actor, grants=grants)
+            }
+            mismatch = [
+                person.full_name
+                for person in everyone
+                if await may_assign_to(
+                    session, actor=actor, grants=grants, assignee=person
+                ) != (person.id in listed)
+            ]
+            check(not mismatch, f"у {title} список совпал с проверкой по одному",
+                  str(mismatch))
+            check(listed, f"и он не пуст у {title}", str(len(listed)))
+
+    print("\n10.1. Право проверяется ещё раз при записи")
+    # Между показом черновика и нажатием кнопки проходит время. Черновик живёт
+    # вне базы, и защищает данные именно вторая проверка — при записи.
+    before = await count_tasks(cast.org)
+    denied.assignee_id = cast.outsider
+    denied.title = "Подложенный исполнитель"
+    refused = False
+    async with session_scope() as session:
+        worker = await session.get(User, cast.worker)
+        grants = await load_grants(session, worker)
+        try:
+            await voice.confirm(session, denied, creator=worker, grants=grants)
+        except TaskError:
+            refused = True
+    check(refused, "запись отвергнута проверкой права")
+    after = await count_tasks(cast.org)
+    check(after == before, "и поручения не появилось", f"{before} → {after}")
+
+    # Тот же путь для кнопки выбора: список собран, но право проверяется снова.
+    async with session_scope() as session:
+        worker = await session.get(User, cast.worker)
+        grants = await load_grants(session, worker)
+        taken = await voice.pick(
+            session, denied, person_id=cast.outsider, creator=worker, grants=grants
+        )
+        mine = await voice.pick(
+            session, denied, person_id=cast.worker, creator=worker, grants=grants
+        )
+    check(not taken, "чужого из списка выбрать нельзя")
+    check(mine and denied.assignee_id == cast.worker, "своего — можно")
+    check(not [n for n in denied.notes if n.startswith("voice.note.assignee")],
+          "и пояснение про исполнителя убрано", str(denied.notes))
 
 
 if __name__ == "__main__":

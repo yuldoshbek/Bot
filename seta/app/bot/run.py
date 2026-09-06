@@ -17,6 +17,7 @@ from app.bot.handlers import (
     registry,
     start,
     tasks,
+    voice,
 )
 from app.bot.loader import bot, dp
 from app.bot.middlewares.auth import AuthMiddleware
@@ -75,6 +76,9 @@ def setup() -> None:
     dp.include_router(availability.router)
     dp.include_router(admin.router)
     dp.include_router(tasks.router)
+    # Голосовое поручение идёт до общего меню: F.voice ловится только здесь,
+    # и порядок важен ровно настолько, насколько важен он у любого фильтра.
+    dp.include_router(voice.router)
     dp.include_router(meetings.router)
     dp.include_router(registry.router)
     dp.include_router(documents.router)

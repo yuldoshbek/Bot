@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from app.core.config import settings
 from app.core.i18n import t
 from app.core.timeutil import parse_hhmm, to_local, to_utc
+from app.core.translit import APOSTROPHES
 
 # Формы всех трёх языков в одном справочнике. Совпадение ищется по границам
 # слова, а не по вхождению: иначе «shanba» (суббота) нашлась бы внутри
@@ -61,6 +62,35 @@ RELATIVE_DAYS: list[tuple[tuple[str, ...], int]] = [
     (("сегодня", "bugun", "бугун"), 0),
 ]
 
+# Числительные словами. Продиктованный срок почти всегда звучит словами —
+# «через три дня», «uch kundan keyin», — и расшифровка речи записывает их
+# словами же. Разбор набранного руками от этой таблицы тоже выигрывает:
+# «через три дня» пишут не реже, чем «через 3 дня».
+NUMERALS: dict[str, int] = {
+    "один": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
+    "пять": 5, "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+    "одиннадцать": 11, "двенадцать": 12, "полторы": 1, "полтора": 1,
+    # Узбекская латиница. Апостроф здесь пишут по-разному, поэтому текст
+    # приводится к одному знаку до сопоставления.
+    "bir": 1, "ikki": 2, "uch": 3, "toʻrt": 4, "besh": 5, "olti": 6,
+    "yetti": 7, "sakkiz": 8, "toʻqqiz": 9, "oʻn": 10,
+    # Узбекская кириллица
+    "бир": 1, "икки": 2, "уч": 3, "тўрт": 4, "беш": 5, "олти": 6,
+    "етти": 7, "саккиз": 8, "тўққиз": 9, "ўн": 10,
+}
+
+# Длинные формы раньше коротких: иначе «одиннадцать» распалось бы на «один».
+NUMERAL = re.compile(
+    r"\b(" + "|".join(sorted(NUMERALS, key=len, reverse=True)) + r")\b"
+)
+
+
+def _digits(text: str) -> str:
+    """Заменяет числительные словами на цифры — до того, как их ищет разбор."""
+    text = re.sub(f"[{re.escape(APOSTROPHES)}]", "\u02bb", text)
+    return NUMERAL.sub(lambda found: str(NUMERALS[found.group(1)]), text)
+
+
 # «через 3 дня», «3 kundan keyin», «2 hafta ichida».
 THROUGH_RU = re.compile(r"через\s+(\d{1,3})\s*(дн|день|дня|дней|недел)")
 THROUGH_UZ = re.compile(
@@ -85,6 +115,9 @@ def parse_due(
 
     raw = text.strip().lower().replace("ё", "е")
     raw = re.sub(r"^(до|к|на)\s+", "", raw)
+    # Числительные словами становятся цифрами до всех остальных правил:
+    # дальше срок ищут регулярные выражения, а они цифры и ищут.
+    raw = _digits(raw)
 
     tz = ZoneInfo(tz_name or settings.default_timezone)
     now_local = to_local(now or datetime.now(tz=tz), tz_name)

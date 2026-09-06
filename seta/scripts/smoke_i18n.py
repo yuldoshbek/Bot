@@ -582,6 +582,11 @@ async def with_database() -> None:
         "app/bot/handlers/menu.py",
         "app/bot/handlers/start.py",
         "app/bot/handlers/registry.py",
+        "app/bot/handlers/voice.py",
+        # Сценарий ИИ: промпты лежат отдельно, в `app/ai/prompts.py`, —
+        # они указание модели, а не строка интерфейса, и переводу
+        # на языки собеседника не подлежат.
+        "app/ai/voice.py",
         "app/bot/keyboards/common.py",
         "app/bot/middlewares/auth.py",
         "app/services/dashboard.py",
@@ -756,6 +761,47 @@ async def with_database() -> None:
         check(UZ["task.notify.approved"] in (praise or ""),
               "и оно по-узбекски, хотя принимал русскоязычный",
               (praise or "")[:70])
+
+    print("\n22. Карточка голосового поручения — на языке говорившего")
+    # Черновик собирается из ключей, а не из готовых строк: он переживает
+    # перезапуск в хранилище состояния, и язык берётся в момент показа.
+    # Ошибка здесь означала бы карточку на чужом языке у того, кто её диктовал.
+    from datetime import timedelta
+
+    from app.ai.voice import Draft, render
+    from app.core.timeutil import utcnow as now_utc
+    from app.models.enums import Priority
+
+    draft = Draft(
+        transcript="Karimovga smeta tayyorlash, ertaga",
+        title="Smeta tayyorlash",
+        assignee_id=1,
+        heard_name="Karimov",
+        due_at=now_utc() + timedelta(days=1),
+        priority=Priority.HIGH,
+        notes=["voice.note.assignee_denied"],
+    )
+    cards = {
+        loc: render(draft, loc, assignee_name="Karimov",
+                    timezone_name="Asia/Tashkent")
+        for loc in LOCALES
+    }
+    check(len(set(cards.values())) == 3, "три языка — три разные карточки",
+          str({k: v[:25] for k, v in cards.items()}))
+    check(RU["voice.draft.not_yet"] in cards["ru"],
+          "русская карточка честно говорит, что поручения ещё нет",
+          cards["ru"][:80])
+    check(UZ["voice.draft.not_yet"] in cards["uz"], "и узбекская тоже",
+          cards["uz"][:80])
+    strays = sorted(set(re.findall(r"[А-Яа-яЁё]+", cards["uz"])))
+    check(not strays, "в узбекской карточке не осталось русских слов", str(strays[:6]))
+    # Подстановка имени переживает перевод: без неё пояснение теряет смысл.
+    for loc, card in cards.items():
+        check("Karimov" in card and "{name}" not in card,
+              f"имя подставлено в пояснение ({loc})", card[-120:])
+    check(to_cyrillic(UZ["voice.draft.not_yet"]) in cards[DERIVED_LOCALE],
+          "кириллическая карточка выведена правилом, а не набрана руками",
+          cards[DERIVED_LOCALE][:80])
 
     await cleanup()
     async with session_scope() as session:

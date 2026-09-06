@@ -191,6 +191,41 @@ async def may_assign_to(
     )
 
 
+async def allowed_assignees(
+    session: AsyncSession, *, actor: User, grants: dict[str, Grant]
+) -> list[User]:
+    """Кому этот человек вправе поручать — списком.
+
+    Живёт рядом с `may_assign_to` намеренно: это одно правило с двух сторон.
+    Список показывают, отдельную запись проверяют, и разойтись они не должны —
+    иначе в списке окажется человек, которому поручить всё равно не дадут.
+
+    Право `task.create` есть и у рядового сотрудника, но с областью «только
+    свои». Без учёта области список включал бы всю организацию, и сотрудник
+    назначил бы поручение руководителю.
+    """
+    grant = grants.get("task.create")
+    if grant is None:
+        return []
+
+    query = select(User).where(
+        User.organization_id == actor.organization_id,
+        User.status == UserStatus.ACTIVE,
+    )
+    if grant.scope == "SELF":
+        query = query.where(User.id == actor.id)
+    elif grant.scope == "DEPARTMENT":
+        visible = await visible_department_ids(session, actor)
+        if not visible:
+            return []
+        query = query.where(User.department_id.in_(visible))
+    elif grant.scope == "SUBORDINATES":
+        query = query.where(User.manager_id == actor.id)
+
+    rows = await session.execute(query.order_by(User.full_name).limit(20))
+    return list(rows.scalars().all())
+
+
 def default_requires_review(priority: Priority) -> bool:
     """Для важного проверка включается сама, для рутины остаётся выключенной."""
     return priority in (Priority.HIGH, Priority.CRITICAL)

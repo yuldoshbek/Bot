@@ -972,4 +972,36 @@ TABLE: dict[str, str] = {
     "error.failed": "Boʻlmadi.",
     "error.try_again": "Qaytadan urinib koʻring.",
     "error.section_closed": "Boʻlim ochiq emas.",
+
+    # ── Голосовое поручение ─────────────────────────────────────────────────
+    "voice.off": (
+        "Ovozli topshiriq yoqilmagan. ➕ Topshiriq tugmasidan foydalaning."
+    ),
+    "voice.no_rights": "Topshiriq berish huquqingiz yoʻq.",
+    "voice.too_long": "Ovozli xabar juda uzun. {limit} daqiqagacha boʻlsin.",
+    "voice.listening": "🎙 Tinglayapman…",
+    "voice.not_heard": (
+        "Nutqni ajrata olmadim. Yana bir marta yozib yuboring yoki matn bilan yozing."
+    ),
+    "voice.draft.title": "🎙 Topshiriq loyihasi",
+    "voice.draft.not_yet": "Hali yaratilmadi — tasdiqlashingizni kutmoqda.",
+    "voice.draft.heard": "Eshitildi",
+    "voice.note.raw": "Gapni boʻlaklarga ajrata olmadim — matn oʻzgarishsiz olindi.",
+    "voice.note.no_assignee": "Ijrochi aytilmadi — roʻyxatdan tanlang.",
+    "voice.note.assignee_unknown": "«{name}» topilmadi — roʻyxatdan tanlang.",
+    "voice.note.assignee_many": (
+        "«{name}» boʻyicha bir necha xodim bor — roʻyxatdan tanlang."
+    ),
+    "voice.note.assignee_denied": (
+        "«{name}»ga topshira olmaysiz — boshqa xodimni tanlang."
+    ),
+    "voice.note.no_due": "Muddat aytilmadi.",
+    "voice.btn.confirm": "✅ Tasdiqlash",
+    "voice.btn.cancel": "✖️ Bekor qilish",
+    "voice.pick": "Ijrochini tanlang",
+    "voice.nobody": "Siz topshiriq bera oladigan xodim yoʻq.",
+    "voice.cancelled": "Bekor qilindi. Hech narsa yaratilmadi.",
+    "voice.created": "Topshiriq yaratildi",
+    "voice.stale": "Loyiha eskirdi. Ovozli xabarni qayta yuboring.",
+    "voice.err.not_ready": "Ijrochi tanlanmagan.",
 }
