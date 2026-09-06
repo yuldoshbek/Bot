@@ -190,10 +190,13 @@ def approval_kb(user_id: int, locale: str | None = None) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Принять", callback_data=f"adm:approve:{user_id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm:reject:{user_id}"),
+                InlineKeyboardButton(text=t("admin.approve", locale),
+                                     callback_data=f"adm:approve:{user_id}"),
+                InlineKeyboardButton(text=t("admin.reject", locale),
+                                     callback_data=f"adm:reject:{user_id}"),
             ],
-            [InlineKeyboardButton(text="✏️ Изменить роль", callback_data=f"adm:role:{user_id}")],
+            [InlineKeyboardButton(text=t("admin.change_role", locale),
+                                  callback_data=f"adm:role:{user_id}")],
         ]
     )
 
@@ -215,39 +218,36 @@ def approval_role_kb(user_id: int, locale: str | None = None) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def availability_kb() -> InlineKeyboardMarkup:
+def availability_kb(locale: str | None = None) -> InlineKeyboardMarkup:
     """Переключение индикатора: одно касание, срок задаётся сразу."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🟢 Принимаю 30 мин", callback_data="av:OPEN:30"),
-                InlineKeyboardButton(text="🟢 1 час", callback_data="av:OPEN:60"),
-            ],
-            [
-                InlineKeyboardButton(text="🟢 До конца дня", callback_data="av:OPEN:day"),
-                InlineKeyboardButton(text="🌙 Поздний приём", callback_data="av:OPENLATE:120"),
-            ],
-            [
-                InlineKeyboardButton(text="🟡 Занят 1 час", callback_data="av:BUSY:60"),
-                InlineKeyboardButton(text="🔴 Не беспокоить", callback_data="av:DND:120"),
-            ],
-            [InlineKeyboardButton(text="⚪ Снять индикатор", callback_data="av:OFF:0")],
-        ]
-    )
+    def button(key: str, data: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(text=t(key, locale), callback_data=data)
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [button("availability.set.open_30", "av:OPEN:30"),
+         button("availability.set.open_60", "av:OPEN:60")],
+        [button("availability.set.open_day", "av:OPEN:day"),
+         button("availability.set.late", "av:OPENLATE:120")],
+        [button("availability.set.busy", "av:BUSY:60"),
+         button("availability.set.dnd", "av:DND:120")],
+        [button("availability.set.off", "av:OFF:0")],
+    ])
 
 
-def admin_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Заявки на регистрацию", callback_data="adm:pending")],
-            [InlineKeyboardButton(text="👥 Сотрудники", callback_data="adm:users")],
-            [InlineKeyboardButton(text="🏢 Отделы", callback_data="adm:depts")],
-            [InlineKeyboardButton(text="🔗 Ссылки-приглашения", callback_data="adm:invites")],
-            [InlineKeyboardButton(text="🕐 Рабочие часы", callback_data="adm:hours")],
-            [InlineKeyboardButton(text="⏳ Лимиты времени", callback_data="adm:quotas")],
-            [InlineKeyboardButton(text="📆 Праздники", callback_data="adm:holidays")],
-            [InlineKeyboardButton(text="🏖 Отпуска", callback_data="adm:absences")],
-            [InlineKeyboardButton(text="🎛 Разделы системы", callback_data="adm:features")],
-            [InlineKeyboardButton(text="📜 Журнал действий", callback_data="adm:audit")],
-        ]
-    )
+def admin_menu_kb(locale: str | None = None) -> InlineKeyboardMarkup:
+    items = [
+        ("admin.pending", "adm:pending"),
+        ("admin.users", "adm:users"),
+        ("admin.departments", "adm:depts"),
+        ("admin.invites", "adm:invites"),
+        ("admin.hours", "adm:hours"),
+        ("admin.quotas", "adm:quotas"),
+        ("admin.holidays", "adm:holidays"),
+        ("admin.absences", "adm:absences"),
+        ("admin.features", "adm:features"),
+        ("admin.audit", "adm:audit"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t(key, locale), callback_data=data)]
+        for key, data in items
+    ])

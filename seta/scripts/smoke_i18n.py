@@ -141,9 +141,12 @@ def main() -> None:
     print("\n6. Иностранное слово остаётся собой")
     check(to_cyrillic("Excel va PDF") == "Excel ва PDF",
           "Excel и PDF не переводятся", to_cyrillic("Excel va PDF"))
+    # Берётся то, что увидит человек, а не голое правило: исключения на то
+    # и заведены, чтобы поправить места, где правило врёт. Проверка правила
+    # в обход исключений не проходит никогда — она просто не о том.
     latin_left = []
-    for key, value in UZ.items():
-        bare = re.sub(r"<[^>]*>|\{[^}]*\}", "", to_cyrillic(value))
+    for key in UZ:
+        bare = re.sub(r"<[^>]*>|\{[^}]*\}", "", t(key, DERIVED_LOCALE))
         for word in re.findall(r"[A-Za-z]+", bare):
             if word not in ("Excel", "PDF"):
                 latin_left.append((key, word))
@@ -519,7 +522,52 @@ async def with_database() -> None:
         check(RU["task.status.in_progress"] not in listed["uz"],
               "и статус в узбекском списке не русский", listed["uz"][:80])
 
-    print("\n18. Экран «Мой день» и показатели говорят на языке смотрящего")
+    print("\n18. В переведённых модулях не осталось русских строк")
+    # Список того, что переведено целиком. Проверка идёт по исходнику: любая
+    # русская строка-литерал в этих файлах означает забытый `t()`. Это ловит
+    # то, чего не поймает ни проверка ключей (ключ-то на месте), ни проверка
+    # экрана (до этой кнопки она может не дойти).
+    #
+    # Комментарии и docstring не в счёт: документация проекта на русском.
+    DONE_MODULES = [
+        "app/bot/handlers/tasks.py",
+        "app/bot/handlers/meetings.py",
+        "app/bot/handlers/documents.py",
+        "app/bot/handlers/availability.py",
+        "app/bot/handlers/menu.py",
+        "app/bot/handlers/start.py",
+        "app/bot/keyboards/common.py",
+        "app/bot/middlewares/auth.py",
+        "app/services/dashboard.py",
+        "app/services/digest.py",
+    ]
+    # Что остаётся по-русски намеренно и почему.
+    ALLOWED = {
+        # Подписи для выгрузок и журнала: файл открывают вне бота, и язык
+        # получателя там неизвестен.
+        "app/services/availability.py": {"STATE_LABELS"},
+    }
+
+    for module in DONE_MODULES:
+        path = ROOT.parent / module
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+                text = ast.get_docstring(node, clean=False)
+                if text:
+                    docstrings.add(text)
+        russian = sorted({
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value not in docstrings
+            and re.search(r"[А-Яа-яЁё]", node.value)
+        })
+        check(not russian, f"{module.split('/')[-1]}: русских строк нет",
+              str([r[:40] for r in russian[:3]]))
+
+    print("\n19. Экран «Мой день» и показатели говорят на языке смотрящего")
     # Экран собирается из показателей, каждый со своим пояснением, и уходит
     # ещё и утренней сводкой. Забытый язык здесь виден сразу всем.
     from app.core.timeutil import utcnow as now_utc

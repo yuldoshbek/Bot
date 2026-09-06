@@ -30,8 +30,6 @@ from app.services.rbac import role_titles
 
 router = Router(name="menu")
 
-COMING_SOON: dict[str, tuple[str, int]] = {}
-
 
 async def _profile_text(
     session: AsyncSession, user: User, roles: set[RoleCode], locale: str
@@ -67,7 +65,7 @@ async def _profile_text(
 
     if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
         view = await get_view(session, user.id)
-        lines.append(f"📶 {t('profile.availability', locale)}: {view.render(user.timezone)}")
+        lines.append(f"📶 {t('profile.availability', locale)}: {view.render(user.timezone, locale)}")
         if view.until_at:
             lines.append(
                 "   " + t("profile.availability_until", locale,
@@ -156,12 +154,3 @@ async def help_message(message: Message, roles: set[RoleCode], locale: str) -> N
             t("help.availability", locale),
         ]
     await message.answer("\n".join(lines))
-
-
-@router.message(F.text.in_(COMING_SOON.keys()))
-async def coming_soon(message: Message) -> None:
-    title, block = COMING_SOON[message.text]
-    await message.answer(
-        f"Раздел «{title}» появится в блоке {block}.\n"
-        "Сейчас работают поручения: создание, сроки, напоминания, проверка."
-    )

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import fmt_time, utcnow
 from app.models.enums import Availability, UserStatus
@@ -27,11 +28,19 @@ from app.services.audit import write_audit
 
 DEFAULT_DURATION_MINUTES = 60
 
+# Русские подписи остаются для журнала; на экран состояние выводится по ключу.
 STATE_LABELS: dict[Availability, str] = {
     Availability.OPEN: "Доступен для приёма",
     Availability.BUSY: "Занят",
     Availability.DND: "Не беспокоить",
     Availability.OFFLINE: "Индикатор не выставлен",
+}
+
+STATE_KEYS: dict[Availability, str] = {
+    Availability.OPEN: "availability.state.open",
+    Availability.BUSY: "availability.state.busy",
+    Availability.DND: "availability.state.dnd",
+    Availability.OFFLINE: "availability.state.offline",
 }
 
 STATE_MARKS: dict[Availability, str] = {
@@ -55,12 +64,13 @@ class AvailabilityView:
     def is_open(self) -> bool:
         return self.state == Availability.OPEN
 
-    def render(self, tz_name: str | None = None) -> str:
+    def render(self, tz_name: str | None = None, locale: str | None = None) -> str:
         mark = STATE_MARKS[self.state]
-        label = STATE_LABELS[self.state]
+        label = t(STATE_KEYS[self.state], locale)
         parts = [f"{mark} {label}"]
         if self.until_at and self.state != Availability.OFFLINE:
-            parts.append(f"до {fmt_time(self.until_at, tz_name)}")
+            parts.append(t("availability.until", locale,
+                           time=fmt_time(self.until_at, tz_name)))
         if self.note:
             parts.append(f"— {esc(self.note)}")
         return " ".join(parts)

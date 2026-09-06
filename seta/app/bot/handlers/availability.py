@@ -10,8 +10,9 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.common import MenuButton, MENU_AVAILABILITY, MENU_WHO_IS_OPEN, availability_kb
-from app.bot.utils import STALE_BUTTON, callback_int
+from app.bot.utils import callback_int
 from app.core.config import settings
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import fmt_time, parse_hhmm, to_local, utcnow
 from app.models.enums import Availability, RoleCode
@@ -35,47 +36,46 @@ def _minutes_until_end_of_day(user: User) -> int:
 
 @router.message(MenuButton(MENU_AVAILABILITY))
 async def show_availability(
-    message: Message, session: AsyncSession, user: User, grants: dict[str, Grant]
+    message: Message, session: AsyncSession, user: User,
+    grants: dict[str, Grant], locale: str,
 ) -> None:
     if not has_permission(grants, "availability.set"):
-        await message.answer("Управление индикатором доступно руководителю и ассистенту.")
+        await message.answer(t("availability.no_rights", locale))
         return
 
     view = await get_view(session, user.id)
     await message.answer(
-        "<b>Ваша доступность</b>\n\n"
-        f"Сейчас: {view.render(user.timezone)}\n\n"
-        "🟢 — сотрудники видят, что вы принимаете, и могут обратиться без заявки\n"
-        "🟡 — заявки принимаются, но обращаться сейчас не нужно\n"
-        "🔴 — придерживаются даже срочные обращения\n"
-        "🌙 — поздний приём: открываются окна после рабочего дня",
-        reply_markup=availability_kb(),
+        f"<b>{t('availability.title', locale)}</b>\n\n"
+        f"{t('availability.now', locale)}: {view.render(user.timezone, locale)}\n\n"
+        f"{t('availability.hint', locale)}",
+        reply_markup=availability_kb(locale),
     )
 
 
 @router.callback_query(F.data.startswith("av:"))
 async def switch_availability(
-    call: CallbackQuery, session: AsyncSession, user: User, grants: dict[str, Grant]
+    call: CallbackQuery, session: AsyncSession, user: User,
+    grants: dict[str, Grant], locale: str,
 ) -> None:
     if not has_permission(grants, "availability.set"):
-        await call.answer("Недостаточно прав.", show_alert=True)
+        await call.answer(t("error.no_rights", locale), show_alert=True)
         return
 
     parts = call.data.split(":", 2)
     if len(parts) < 3:
-        await call.answer(STALE_BUTTON, show_alert=True)
+        await call.answer(t("error.stale_button", locale), show_alert=True)
         return
     _, action, argument = parts
 
     if action not in ("OFF", "OPEN", "OPENLATE", "BUSY", "DND"):
-        await call.answer(STALE_BUTTON, show_alert=True)
+        await call.answer(t("error.stale_button", locale), show_alert=True)
         return
 
     if action == "OFF":
         view = await set_state(
             session, user=user, state=Availability.OFFLINE, minutes=None, note=None
         )
-        await call.answer("Индикатор снят")
+        await call.answer(t("availability.cleared", locale))
     else:
         opens_late = action == "OPENLATE"
         state = Availability.OPEN if action in ("OPEN", "OPENLATE") else Availability(action)
@@ -84,7 +84,7 @@ async def switch_availability(
         else:
             value = callback_int(call.data)
             if value is None:
-                await call.answer(STALE_BUTTON, show_alert=True)
+                await call.answer(t("error.stale_button", locale), show_alert=True)
                 return
             # Ограничение по смыслу решения Р-12: вечного «доступен» не бывает,
             # а значение из кнопки приходит от клиента и может быть любым.
@@ -97,24 +97,26 @@ async def switch_availability(
             opens_late_slots=opens_late,
             changed_by=user.id,
         )
-        await call.answer("Готово")
+        await call.answer(t("common.done", locale))
 
     tail = ""
     if view.is_open:
-        tail = "\n\nСотрудники видят это в разделе «Кто на связи»."
+        tail = "\n\n" + t("availability.seen_by", locale)
         if view.opens_late_slots:
-            tail += "\nОткрыты и поздние окна — после конца рабочего дня."
+            tail += "\n" + t("availability.late_open", locale)
 
     await call.message.edit_text(
-        f"<b>Ваша доступность</b>\n\nСейчас: {view.render(user.timezone)}{tail}",
-        reply_markup=availability_kb(),
+        f"<b>{t('availability.title', locale)}</b>\n\n"
+        f"{t('availability.now', locale)}: "
+        f"{view.render(user.timezone, locale)}{tail}",
+        reply_markup=availability_kb(locale),
     )
 
 
 @router.message(MenuButton(MENU_WHO_IS_OPEN))
 async def who_is_open(
     message: Message, session: AsyncSession, organization: Organization,
-    user: User, grants: dict[str, Grant],
+    user: User, grants: dict[str, Grant], locale: str,
 ) -> None:
     """Экран сотрудника: кто из руководителей принимает прямо сейчас.
 
@@ -124,23 +126,24 @@ async def who_is_open(
     любому, кто нажал кнопку до подтверждения заявки.
     """
     if not has_permission(grants, "calendar.read_free"):
-        await message.answer("Раздел доступен сотрудникам организации.")
+        await message.answer(t("availability.who_rights", locale))
         return
 
     rows = await open_executives(session, organization.id)
     if not rows:
-        await message.answer(
-            "Сейчас никто не отмечен как доступный.\n"
-            "Запросите встречу — система предложит свободные окна."
-        )
+        await message.answer(t("availability.nobody", locale))
         return
 
-    lines = ["<b>Сейчас принимают</b>", ""]
+    lines = [f"<b>{t('availability.who_title', locale)}</b>", ""]
     for person, view in rows:
-        until = f" до {fmt_time(view.until_at, user.timezone)}" if view.until_at else ""
+        until = (
+            " " + t("availability.until", locale,
+                    time=fmt_time(view.until_at, user.timezone))
+            if view.until_at else ""
+        )
         note = f"\n   {esc(view.note)}" if view.note else ""
         lines.append(f"🟢 <b>{esc(person.full_name)}</b>{until}{note}")
     lines.append("")
-    lines.append("Можно обратиться сейчас, не создавая заявку.")
+    lines.append(t("availability.can_ask", locale))
 
     await message.answer("\n".join(lines))

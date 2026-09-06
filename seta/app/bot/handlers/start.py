@@ -324,6 +324,6 @@ async def greeting(
 
     if RoleCode.EXECUTIVE in roles or RoleCode.ASSISTANT in roles:
         view = await get_view(session, user.id)
-        lines.append(t("start.availability_line", locale, state=view.render(user.timezone)))
+        lines.append(t("start.availability_line", locale, state=view.render(user.timezone, locale)))
 
     return "\n".join(lines)
