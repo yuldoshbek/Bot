@@ -15,6 +15,7 @@
 4. Выключенный ИИ не ломает ничего — и это проверяется первым.
 """
 import asyncio
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -26,17 +27,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import delete, func, select
 
-from app.ai import gate, summary, voice
+from app.ai import gate, protocol, summary, voice
 from app.ai.provider import Fake
 from app.core.config import settings
 from app.core.dates import parse_due
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
 from app.models import (
+    AgendaItem,
     AiCall,
     AuditLog,
     Decision,
     Department,
+    Meeting,
+    MeetingParticipant,
+    MeetingStatus,
     Notification,
     Organization,
     Priority,
@@ -50,7 +55,7 @@ from app.models import (
     UserStatus,
     WorkingHours,
 )
-from app.services import digest
+from app.services import decisions, digest
 from app.services import tasks as task_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
@@ -105,6 +110,17 @@ async def cleanup() -> None:
         await session.execute(
             delete(Decision).where(Decision.organization_id.in_(org_ids))
         )
+        meeting_ids = list((await session.execute(
+            select(Meeting.id).where(Meeting.organization_id.in_(org_ids))
+        )).scalars().all())
+        if meeting_ids:
+            await session.execute(
+                delete(AgendaItem).where(AgendaItem.meeting_id.in_(meeting_ids))
+            )
+            await session.execute(delete(MeetingParticipant).where(
+                MeetingParticipant.meeting_id.in_(meeting_ids)
+            ))
+            await session.execute(delete(Meeting).where(Meeting.id.in_(meeting_ids)))
         if user_ids:
             for model in (UserRole, WorkingHours, Notification):
                 await session.execute(delete(model).where(model.user_id.in_(user_ids)))
@@ -179,6 +195,7 @@ async def main() -> None:
         await stage_confirm(cast)
         await stage_rights(cast)
         await stage_digest(cast)
+        await stage_protocol(cast)
     finally:
         settings.ai_enabled = was_enabled
         gate.use(Fake())
@@ -910,6 +927,298 @@ async def stage_digest(cast: Cast) -> None:
     check(summary.fill("{who}", {"who": "<b>"}) == "&lt;b&gt;",
           "значение тоже экранируется")
     settings.ai_enabled = True
+
+
+async def _meeting_with_agenda(cast: Cast) -> tuple[int, list[int]]:
+    """Прошедшая встреча с повесткой из трёх пунктов. Один уже с решением."""
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        meeting = Meeting(
+            organization_id=cast.org, owner_id=cast.chief, created_by=cast.chief,
+            title="ТЕСТ Haftalik yigʻilish",
+            start_at=MORNING - timedelta(hours=3),
+            end_at=MORNING - timedelta(hours=2),
+            status=MeetingStatus.FINISHED,
+        )
+        session.add(meeting)
+        await session.flush()
+        for who in (cast.chief, cast.worker):
+            session.add(MeetingParticipant(
+                meeting_id=meeting.id, user_id=who, created_at=MORNING,
+            ))
+        points = []
+        for number, title in enumerate(
+            ("Byudjet holati", "Yangi ombor", "Xodimlar rejasi"), start=1
+        ):
+            point = AgendaItem(
+                meeting_id=meeting.id, position=number, title=title,
+                created_by=cast.chief,
+            )
+            session.add(point)
+            await session.flush()
+            points.append(point.id)
+
+        # По третьему пункту решение уже записано: второй раз его предлагать
+        # нельзя, и это отдельная проверка.
+        done = await session.get(AgendaItem, points[2])
+        await decisions.create(
+            session, actor=chief, title="Xodimlar rejasi tasdiqlandi",
+            meeting=meeting, agenda_item=done,
+        )
+        return meeting.id, points
+
+
+async def _counts(org_id: int) -> tuple[int, int]:
+    async with session_scope() as session:
+        made = await session.scalar(
+            select(func.count(Decision.id)).where(Decision.organization_id == org_id)
+        )
+        given = await session.scalar(
+            select(func.count(Task.id)).where(Task.organization_id == org_id)
+        )
+    return int(made or 0), int(given or 0)
+
+
+async def _build(cast: Cast, meeting_id: int):
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        meeting = await session.get(Meeting, meeting_id)
+        grants = await load_grants(session, chief)
+        return await protocol.build(
+            session, meeting=meeting, actor=chief, grants=grants, now=NOW
+        )
+
+
+async def stage_protocol(cast: Cast) -> None:
+    print("\n12. Протокол встречи: подтверждение по одному")
+    meeting_id, points = await _meeting_with_agenda(cast)
+
+    print("\n12.1. Без ИИ черновик всё равно есть — из повестки")
+    settings.ai_enabled = False
+    fake = Fake(answers=["не должно прозвучать"])
+    gate.use(fake)
+    before = await _counts(cast.org)
+    plain = await _build(cast, meeting_id)
+    check(fake.calls == 0, "модель не звали", str(fake.calls))
+    check(len(plain.items) == 2, "предложены два пункта без решения",
+          str([item.title for item in plain.items]))
+    check(all(item.kind == "decision" for item in plain.items),
+          "и оба — решения")
+    check(plain.items[0].title == "Byudjet holati",
+          "название взято из повестки", plain.items[0].title)
+    check(all(item.agenda_item_id in points[:2] for item in plain.items),
+          "пункт с готовым решением второй раз не предложен",
+          str([item.agenda_number for item in plain.items]))
+    check(await _counts(cast.org) == before, "и в реестре не появилось ничего")
+
+    print("\n12.2. Модель уточняет формулировки, но не выдумывает пунктов")
+    settings.ai_enabled = True
+    answer = json.dumps({"items": [
+        {"agenda": 1, "kind": "decision",
+         "title": "Byudjet oʻzgarishsiz qoldirilsin"},
+        {"agenda": 2, "kind": "decision", "title": "Ombor qurilishi boshlansin"},
+        {"agenda": 2, "kind": "task", "title": "Ombor smetasini tayyorlash",
+         "responsible": "Karimov", "due": "juma gacha"},
+        {"agenda": 3, "kind": "decision", "title": "Ikkinchi qaror"},
+        {"agenda": 9, "kind": "decision", "title": "Boshqa yigʻilishdan"},
+        {"agenda": 1, "kind": "выдумка", "title": "Notoʻgʻri tur"},
+    ]}, ensure_ascii=False)
+    gate.use(Fake(answers=[answer]))
+    before = await _counts(cast.org)
+    draft = await _build(cast, meeting_id)
+    titles = [item.title for item in draft.items]
+
+    check(draft.items[0].title == "Byudjet oʻzgarishsiz qoldirilsin",
+          "формулировка модели заменила название пункта", draft.items[0].title)
+    check("Boshqa yigʻilishdan" not in titles,
+          "пункт с чужим номером повестки отброшен", str(titles))
+    check("Ikkinchi qaror" not in titles,
+          "второе решение по закрытому пункту не предложено", str(titles))
+    check("Notoʻgʻri tur" not in titles, "неизвестный вид записи отброшен",
+          str(titles))
+    task_items = [item for item in draft.items if item.kind == "task"]
+    check(len(task_items) == 1, "предложено одно поручение", str(len(task_items)))
+    check(task_items[0].responsible_id == cast.worker,
+          "исполнителя нашла система", str(task_items[0].responsible_id))
+    check(task_items[0].due_at == parse_due("juma gacha", "Asia/Tashkent", now=NOW),
+          "срок посчитан тем же разбором", str(task_items[0].due_at))
+    check(await _counts(cast.org) == before,
+          "и до подтверждения в реестре по-прежнему пусто")
+
+    print("\n12.3. Подтверждение одного пункта создаёт ровно один")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        meeting = await session.get(Meeting, meeting_id)
+        grants = await load_grants(session, chief)
+        ok, reason = await protocol.take(
+            session, draft, 0, meeting=meeting, actor=chief, grants=grants
+        )
+        check(ok, "пункт записан", reason)
+    made, given = await _counts(cast.org)
+    check((made, given) == (before[0] + 1, before[1]),
+          "прибавилось ровно одно решение", f"{before} → {(made, given)}")
+    check(draft.items[0].state == "taken", "пункт отмечен внесённым")
+    check(all(item.state == "new" for item in draft.items[1:]),
+          "остальные остались непринятыми — «принять всё» здесь нет",
+          str([item.state for item in draft.items]))
+
+    async with session_scope() as session:
+        written = await session.get(Decision, draft.items[0].created_id)
+        check(written is not None, "решение нашлось в реестре")
+        check(written.meeting_id == meeting_id, "и привязано к встрече")
+        check(written.agenda_item_id == points[0], "и к пункту повестки")
+        check(written.title == "Byudjet oʻzgarishsiz qoldirilsin",
+              "с той формулировкой, что человек видел", written.title)
+
+    print("\n12.4. Повторное нажатие второй записи не делает")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        meeting = await session.get(Meeting, meeting_id)
+        grants = await load_grants(session, chief)
+        again, reason = await protocol.take(
+            session, draft, 0, meeting=meeting, actor=chief, grants=grants
+        )
+    check(not again, "второй раз тот же пункт не записан")
+    check(reason == "protocol.err.already", "и причина названа", reason)
+    check(await _counts(cast.org) == (made, given), "в реестре ничего не прибавилось")
+
+    print("\n12.5. Отклонённый пункт не остаётся нигде")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        meeting = await session.get(Meeting, meeting_id)
+        grants = await load_grants(session, chief)
+        dropped = await protocol.drop(session, draft, 1)
+        check(dropped, "пункт отклонён")
+        after_drop = await protocol.take(
+            session, draft, 1, meeting=meeting, actor=chief, grants=grants
+        )
+    check(draft.items[1].state == "dropped", "отметка стоит",
+          draft.items[1].state)
+    check(draft.items[1].created_id is None, "записи ему не соответствует")
+    check(not after_drop[0], "отклонённый пункт записать нельзя", after_drop[1])
+    check(await _counts(cast.org) == (made, given), "и реестр не изменился")
+
+    print("\n12.6. Право поручать проверяет система, а не модель")
+    gate.use(Fake(answers=[json.dumps({"items": [
+        {"agenda": 1, "kind": "task", "title": "Yusupovga topshiriq",
+         "responsible": "Yusupov"},
+    ]}, ensure_ascii=False)]))
+    async with session_scope() as session:
+        worker = await session.get(User, cast.worker)
+        meeting = await session.get(Meeting, meeting_id)
+        grants = await load_grants(session, worker)
+        low = await protocol.build(
+            session, meeting=meeting, actor=worker, grants=grants, now=NOW
+        )
+        outsider_items = [
+            item for item in low.items
+            if item.kind == "task" and item.heard_name == "Yusupov"
+        ]
+        check(outsider_items, "поручение предложено", str(len(low.items)))
+        check(outsider_items[0].responsible_id is None,
+              "но исполнитель не подставлен",
+              str(outsider_items[0].responsible_id))
+        check("protocol.note.cannot_assign" in outsider_items[0].notes,
+              "и причина названа", str(outsider_items[0].notes))
+
+        index = low.items.index(outsider_items[0])
+        refused = await protocol.take(
+            session, low, index, meeting=meeting, actor=worker, grants=grants
+        )
+    check(not refused[0], "записать такое поручение нельзя", refused[1])
+    check(await _counts(cast.org) == (made, given), "и реестр не изменился")
+
+    # Право проверяется ещё раз при записи. Черновик живёт вне базы, и первая
+    # проверка — для показа; защищает данные вторая. Подкладываем в черновик
+    # исполнителя, которого туда не пустили.
+    async with session_scope() as session:
+        worker = await session.get(User, cast.worker)
+        meeting = await session.get(Meeting, meeting_id)
+        grants = await load_grants(session, worker)
+        low.items[index].responsible_id = cast.outsider
+        low.items[index].state = "new"
+        forced = await protocol.take(
+            session, low, index, meeting=meeting, actor=worker, grants=grants
+        )
+    check(not forced[0], "подложенный исполнитель запись не проводит", forced[1])
+    check(forced[1] == "protocol.err.cannot_assign", "и отказ по праву",
+          forced[1])
+    check(await _counts(cast.org) == (made, given), "поручения не появилось")
+
+    print("\n12.7. Журнал знает, чем кончилось предложение")
+    async with session_scope() as session:
+        taken_call = await session.get(AiCall, draft.call_id)
+        check(taken_call.kind == "protocol", "вызов записан как протокол",
+              str(taken_call.kind))
+        check(taken_call.prompt_version == protocol.PROMPT_VERSION,
+              "с версией промпта", str(taken_call.prompt_version))
+        check(taken_call.confirmed is True,
+              "принятый пункт отмечен подтверждением", str(taken_call.confirmed))
+
+    # Черновик, из которого отклонили всё, — это отказ, а не молчание.
+    gate.use(Fake(answers=[json.dumps({"items": [
+        {"agenda": 2, "kind": "decision", "title": "Bekor qilinadigan qaror"},
+    ]}, ensure_ascii=False)]))
+    refusal = await _build(cast, meeting_id)
+    async with session_scope() as session:
+        for index in range(len(refusal.items)):
+            await protocol.drop(session, refusal, index)
+        call = await session.get(AiCall, refusal.call_id)
+        check(call.confirmed is False, "отклонённый целиком — отмечен отказом",
+              str(call.confirmed))
+    check(await _counts(cast.org) == (made, given), "и в реестре по-прежнему пусто")
+
+    print("\n12.8. Встреча без повестки протокола не даёт")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        bare = Meeting(
+            organization_id=cast.org, owner_id=cast.chief, created_by=cast.chief,
+            title="ТЕСТ Kun tartibisiz",
+            start_at=MORNING - timedelta(hours=5),
+            end_at=MORNING - timedelta(hours=4),
+            status=MeetingStatus.FINISHED,
+        )
+        session.add(bare)
+        await session.flush()
+        empty = await protocol.build(
+            session, meeting=bare, actor=chief, grants=grants, now=NOW
+        )
+    check(not empty.items, "предложений нет", str(len(empty.items)))
+    check(empty.call_id is None, "и модель не звали вовсе", str(empty.call_id))
+
+    print("\n12.9. Повестка вся закрыта — предлагать нечего, и модель молчит")
+    gate.use(Fake(answers=["не должно прозвучать"]))
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        closed = Meeting(
+            organization_id=cast.org, owner_id=cast.chief, created_by=cast.chief,
+            title="ТЕСТ Hammasi hal",
+            start_at=MORNING - timedelta(hours=7),
+            end_at=MORNING - timedelta(hours=6),
+            status=MeetingStatus.FINISHED,
+        )
+        session.add(closed)
+        await session.flush()
+        session.add(MeetingParticipant(
+            meeting_id=closed.id, user_id=cast.chief, created_at=MORNING
+        ))
+        point = AgendaItem(
+            meeting_id=closed.id, position=1, title="Yagona band",
+            created_by=cast.chief,
+        )
+        session.add(point)
+        await session.flush()
+        await decisions.create(
+            session, actor=chief, title="Yagona band boʻyicha qaror",
+            meeting=closed, agenda_item=point,
+        )
+        full = await protocol.build(
+            session, meeting=closed, actor=chief, grants=grants, now=NOW
+        )
+    check(not full.items, "предложений нет", str(len(full.items)))
+    check(full.call_id is None, "и модель не звали", str(full.call_id))
 
 
 if __name__ == "__main__":

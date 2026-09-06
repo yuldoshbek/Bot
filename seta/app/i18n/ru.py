@@ -997,4 +997,36 @@ TABLE: dict[str, str] = {
     "voice.created": "Поручение создано",
     "voice.stale": "Черновик устарел. Запишите голосовое заново.",
     "voice.err.not_ready": "Исполнитель не выбран.",
+
+    # ── Протокол встречи ────────────────────────────────────────────────────
+    "meeting.action.protocol": "📝 Протокол",
+    "protocol.off": "Черновик протокола не включён.",
+    "protocol.no_rights": "У вас нет права вносить решения.",
+    "protocol.building": "📝 Смотрю повестку…",
+    "protocol.no_agenda": (
+        "Повестки нет — протокол собрать не из чего. "
+        "Добавьте пункты и попробуйте снова."
+    ),
+    "protocol.nothing": "По каждому пункту повестки решение уже есть.",
+    "protocol.header": "📝 Черновик протокола",
+    "protocol.not_yet": "Пока не записано ничего — каждый пункт подтверждается отдельно.",
+    "protocol.step": "Пункт {number} из {total}",
+    "protocol.from_agenda": "Повестка, пункт {number}",
+    "protocol.kind.decision": "Решение",
+    "protocol.kind.task": "Поручение",
+    "protocol.field.responsible": "Ответственный",
+    "protocol.btn.take": "✅ Записать",
+    "protocol.btn.skip": "➡️ Пропустить",
+    "protocol.btn.stop": "✖️ Остановить",
+    "protocol.note.no_due": "Срок не разобрал — запишется без срока.",
+    "protocol.note.responsible_unknown": "«{name}» не найден — запишется без ответственного.",
+    "protocol.note.cannot_assign": "Вы не вправе поручать «{name}».",
+    "protocol.err.stale": "Черновик устарел. Откройте протокол заново.",
+    "protocol.err.already": "По этому пункту уже принято решение.",
+    "protocol.err.other_org": "Ответственный из другой организации.",
+    "protocol.err.refused": "Записать не удалось.",
+    "protocol.err.no_assignee": "Для поручения нужен исполнитель.",
+    "protocol.err.cannot_assign": "Вы не вправе поручать этому сотруднику.",
+    "protocol.done": "Протокол: записано {taken}, пропущено {dropped}.",
+    "protocol.stopped": "Остановлено. Записанное осталось в реестре.",
 }

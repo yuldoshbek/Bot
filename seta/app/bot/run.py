@@ -14,6 +14,7 @@ from app.bot.handlers import (
     documents,
     meetings,
     menu,
+    protocol,
     registry,
     start,
     tasks,
@@ -80,6 +81,8 @@ def setup() -> None:
     # и порядок важен ровно настолько, насколько важен он у любого фильтра.
     dp.include_router(voice.router)
     dp.include_router(meetings.router)
+    # Протокол ловит mt:proto: — до общего обработчика карточки встречи.
+    dp.include_router(protocol.router)
     dp.include_router(registry.router)
     dp.include_router(documents.router)
     dp.include_router(menu.router)

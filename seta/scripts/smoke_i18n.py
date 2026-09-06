@@ -583,9 +583,15 @@ async def with_database() -> None:
         "app/bot/handlers/start.py",
         "app/bot/handlers/registry.py",
         "app/bot/handlers/voice.py",
+        "app/bot/handlers/protocol.py",
         # Сценарий ИИ: промпты лежат отдельно, в `app/ai/prompts.py`, —
         # они указание модели, а не строка интерфейса, и переводу
         # на языки собеседника не подлежат.
+        #
+        # `app/ai/summary.py` и `app/ai/protocol.py` в списке не значатся
+        # намеренно: там собирается сообщение для модели, а не для человека,
+        # и русские строки в нём — часть промпта. Человеку эти модули
+        # отвечают ключами словаря, и переводит их обработчик.
         "app/ai/voice.py",
         "app/bot/keyboards/common.py",
         "app/bot/middlewares/auth.py",

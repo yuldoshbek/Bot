@@ -1004,4 +1004,36 @@ TABLE: dict[str, str] = {
     "voice.created": "Topshiriq yaratildi",
     "voice.stale": "Loyiha eskirdi. Ovozli xabarni qayta yuboring.",
     "voice.err.not_ready": "Ijrochi tanlanmagan.",
+
+    # ── Протокол встречи ────────────────────────────────────────────────────
+    "meeting.action.protocol": "📝 Bayonnoma",
+    "protocol.off": "Bayonnoma loyihasi yoqilmagan.",
+    "protocol.no_rights": "Qaror yozish huquqingiz yoʻq.",
+    "protocol.building": "📝 Kun tartibini koʻryapman…",
+    "protocol.no_agenda": (
+        "Kun tartibi yoʻq — bayonnomani tuzib boʻlmaydi. "
+        "Bandlarni qoʻshing va qaytadan urinib koʻring."
+    ),
+    "protocol.nothing": "Kun tartibining har bir bandi boʻyicha qaror allaqachon bor.",
+    "protocol.header": "📝 Bayonnoma loyihasi",
+    "protocol.not_yet": "Hali hech narsa yozilmadi — har bir band alohida tasdiqlanadi.",
+    "protocol.step": "Band {number} / {total}",
+    "protocol.from_agenda": "Kun tartibi, {number}-band",
+    "protocol.kind.decision": "Qaror",
+    "protocol.kind.task": "Topshiriq",
+    "protocol.field.responsible": "Masʼul",
+    "protocol.btn.take": "✅ Yozish",
+    "protocol.btn.skip": "➡️ Oʻtkazib yuborish",
+    "protocol.btn.stop": "✖️ Toʻxtatish",
+    "protocol.note.no_due": "Muddatni tushunmadim — muddatsiz yoziladi.",
+    "protocol.note.responsible_unknown": "«{name}» topilmadi — masʼulsiz yoziladi.",
+    "protocol.note.cannot_assign": "«{name}»ga topshira olmaysiz.",
+    "protocol.err.stale": "Loyiha eskirdi. Bayonnomani qaytadan oching.",
+    "protocol.err.already": "Bu band boʻyicha qaror allaqachon qabul qilingan.",
+    "protocol.err.other_org": "Masʼul boshqa tashkilotdan.",
+    "protocol.err.refused": "Yozib boʻlmadi.",
+    "protocol.err.no_assignee": "Topshiriq uchun ijrochi kerak.",
+    "protocol.err.cannot_assign": "Bu xodimga topshira olmaysiz.",
+    "protocol.done": "Bayonnoma: {taken} ta yozildi, {dropped} ta oʻtkazib yuborildi.",
+    "protocol.stopped": "Toʻxtatildi. Yozilganlari reyestrda qoldi.",
 }

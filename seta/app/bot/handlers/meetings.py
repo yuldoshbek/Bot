@@ -26,6 +26,7 @@ from app.bot.keyboards.common import (
     MenuButton,
 )
 from app.bot.utils import callback_int
+from app.core.config import settings
 from app.core.i18n import t
 from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt, to_local, utcnow
@@ -180,6 +181,20 @@ def _card_kb(
         ))
     if outcome_row:
         rows.append(outcome_row)
+
+    # Протокол — только по прошедшей встрече и только при включённом ИИ:
+    # черновик собирается из повестки и того, что уже записано, а до конца
+    # встречи ни того, ни другого ещё нет.
+    if (
+        settings.ai_enabled
+        and live
+        and now >= meeting.end_at
+        and has_permission(grants, "decision.create")
+    ):
+        rows.append([InlineKeyboardButton(
+            text=t("meeting.action.protocol", locale),
+            callback_data=f"mt:proto:{meeting.id}",
+        )])
 
     tail = [InlineKeyboardButton(text=t("meeting.action.files", locale),
                                  callback_data=f"mt:files:{meeting.id}")]
