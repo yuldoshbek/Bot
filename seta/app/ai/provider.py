@@ -28,14 +28,20 @@ class Answer:
     cost_usd: float = 0.0
 
 
+# Отрезок речи: начало, конец, слова. По паузам между отрезками текст
+# разбивается на абзацы — это единственный настоящий признак смены мысли.
+Piece = tuple[float, float, str]
+
+
 @dataclass(slots=True)
 class Heard:
-    """Расшифровка речи."""
+    """Расшифровка речи вместе с разметкой по времени."""
 
     text: str
     model: str
     seconds: float = 0.0
     cost_usd: float = 0.0
+    pieces: list[Piece] = field(default_factory=list)
 
 
 class ProviderError(Exception):
@@ -50,6 +56,10 @@ class Provider(Protocol):
     """
 
     name: str
+    # Бесплатна ли расшифровка. Своя служба на своём железе денег не стоит,
+    # и потолок расхода её останавливать не должен: иначе исчерпанный бюджет
+    # текстовой модели выключал бы заодно и то, что ничего не стоит.
+    free_voice: bool
 
     async def ask(
         self, *, system: str, user: str, model: str, max_output: int = 700
@@ -73,8 +83,10 @@ class Fake:
     """
 
     name: str = "fake"
+    free_voice: bool = False
     answers: list[str] = field(default_factory=list)
     transcripts: list[str] = field(default_factory=list)
+    pieces: list[Piece] = field(default_factory=list)
     # Сколько раз обращались — по этому счётчику проверки убеждаются, что при
     # исчерпанном бюджете вызова не было вовсе, а не был и проигнорирован.
     calls: int = 0
@@ -98,4 +110,7 @@ class Fake:
         if self.fail:
             raise ProviderError("подставной поставщик настроен на отказ")
         text = self.transcripts.pop(0) if self.transcripts else ""
-        return Heard(text=text, model=model, seconds=len(audio) / 16000, cost_usd=0.0)
+        return Heard(
+            text=text, model=model, seconds=len(audio) / 16000, cost_usd=0.0,
+            pieces=list(self.pieces),
+        )

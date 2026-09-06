@@ -1,0 +1,7 @@
+# faster-whisper — реализация Whisper на CTranslate2. Работает на процессоре,
+# в int8 укладывается в память маленького сервера и не требует ffmpeg
+# в системе: звук декодирует PyAV, который ставится колесом.
+faster-whisper>=1.1
+fastapi>=0.115
+uvicorn[standard]>=0.34
+python-multipart>=0.0.20

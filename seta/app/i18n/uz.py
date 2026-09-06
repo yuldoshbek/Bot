@@ -974,9 +974,7 @@ TABLE: dict[str, str] = {
     "error.section_closed": "Boʻlim ochiq emas.",
 
     # ── Голосовое поручение ─────────────────────────────────────────────────
-    "voice.off": (
-        "Ovozli topshiriq yoqilmagan. ➕ Topshiriq tugmasidan foydalaning."
-    ),
+    "voice.off": "Nutqni matnga oʻgirish sozlanmagan.",
     "voice.no_rights": "Topshiriq berish huquqingiz yoʻq.",
     "voice.too_long": "Ovozli xabar juda uzun. {limit} daqiqagacha boʻlsin.",
     "voice.listening": "🎙 Tinglayapman…",
@@ -1036,4 +1034,9 @@ TABLE: dict[str, str] = {
     "protocol.err.cannot_assign": "Bu xodimga topshira olmaysiz.",
     "protocol.done": "Bayonnoma: {taken} ta yozildi, {dropped} ta oʻtkazib yuborildi.",
     "protocol.stopped": "Toʻxtatildi. Yozilganlari reyestrda qoldi.",
+
+    # ── Расшифровка голосовых ───────────────────────────────────────────────
+    "voice.text.title": "🎙 Matn · {length}",
+    "voice.text.kept": "Ovozli xabar saqlandi.",
+    "voice.btn.task": "➕ Topshiriq qilish",
 }

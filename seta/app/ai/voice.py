@@ -41,15 +41,18 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import gate
 from app.ai.prompts import VOICE_HINT, VOICE_TASK
+from app.core import speech
 from app.core.dates import humanize_due, parse_due
 from app.core.i18n import t
 from app.core.text import cut, esc
 from app.models.enums import Priority
 from app.models.task import Task
+from app.models.voice import VoiceNote
 from app.models.user import User
 from app.services import tasks as task_service
 from app.services.rbac import Grant
@@ -60,9 +63,12 @@ log = logging.getLogger("seta.ai.voice")
 # поодиночке, и переводу на языки интерфейса они не подлежат.
 PROMPT_VERSION = VOICE_TASK.version
 
-# Предел длины голосового. Не косметика: расшифровка стоит за минуту,
-# и одна сорокаминутная запись съедает дневной бюджет целиком.
+# Предел длины голосового у платной расшифровки. Не косметика: она стоит
+# за минуту, и одна сорокаминутная запись съедает дневной бюджет целиком.
 MAX_SECONDS = 180
+# У своей службы предел другой: она не стоит ничего, и пересланное совещание
+# ей расшифровать не жалко. Ограничение остаётся только от бессмыслицы.
+FREE_MAX_SECONDS = 3600
 
 # Поля, которые принимаются от модели. Перечень заранее — единственный способ
 # не зависеть от её фантазии: всё остальное отбрасывается молча.
@@ -163,6 +169,74 @@ def payload(raw: str) -> dict[str, str]:
             if cleaned:
                 fields[key] = cleaned
     return fields
+
+
+def max_seconds() -> int:
+    """Сколько речи готовы слушать. Предел следует за ценой, а не наоборот."""
+    return FREE_MAX_SECONDS if getattr(gate.current(), "free_voice", False) else MAX_SECONDS
+
+
+async def remember(
+    session: AsyncSession,
+    *,
+    user: User,
+    file_id: str,
+    file_unique_id: str,
+    duration_seconds: int,
+    size_bytes: int,
+) -> VoiceNote:
+    """Сохраняет голосовое или находит уже сохранённое.
+
+    Запись хранится всегда, даже если расшифровать её не вышло: распознавание
+    ошибается, и спор «я такого не говорил» разрешается только звуком.
+    """
+    found = (
+        await session.execute(
+            select(VoiceNote).where(
+                VoiceNote.organization_id == user.organization_id,
+                VoiceNote.file_unique_id == file_unique_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if found is not None:
+        # То же самое голосовое переслали второй раз. Расшифровка у него уже
+        # есть, и тратить на неё время человека незачем.
+        return found
+
+    note = VoiceNote(
+        organization_id=user.organization_id,
+        user_id=user.id,
+        file_id=file_id[:256],
+        file_unique_id=file_unique_id[:128],
+        duration_seconds=int(duration_seconds or 0),
+        size_bytes=int(size_bytes or 0),
+    )
+    session.add(note)
+    await session.flush()
+    return note
+
+
+async def write_down(
+    session: AsyncSession, note: VoiceNote, audio: bytes, *, user: User
+) -> str:
+    """Расшифровывает и оформляет. Уже расшифрованное не слушает заново.
+
+    Оформление — абзацами, по паузам в речи: разбивку делает код, а не модель.
+    Правила простые и одинаковые для всех языков, а модель за ту же работу
+    берёт деньги и иногда переписывает слова.
+    """
+    if note.transcript:
+        return note.transcript
+
+    outcome = await listen(session, audio, creator=user)
+    if not outcome.worked:
+        return ""
+
+    heard = outcome.heard
+    note.transcript = speech.pretty(outcome.text, heard.pieces if heard else None)
+    note.model = (heard.model if heard else "")[:64] or None
+    await session.flush()
+    return note.transcript
 
 
 async def listen(

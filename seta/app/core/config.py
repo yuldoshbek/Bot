@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     ai_model_routine: str = "gpt-4o-mini"
     ai_model_report: str = "gpt-4o"
     ai_model_voice: str = "whisper-1"
+    # Своя служба расшифровки. Задан адрес — речь слушает она, и это
+    # не стоит ничего: потолок расхода такую расшифровку не касается.
+    # Пусто — речь слушает платная модель, и только при AI_ENABLED=true.
+    stt_url: str = ""
 
     # Рабочие правила по умолчанию (настраиваются в админке на отдел/человека)
     work_start: str = "09:00"

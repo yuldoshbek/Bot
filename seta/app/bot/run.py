@@ -20,6 +20,7 @@ from app.bot.handlers import (
     tasks,
     voice,
 )
+from app.ai import gate
 from app.bot.loader import bot, dp
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.config import settings
@@ -86,6 +87,9 @@ def setup() -> None:
     dp.include_router(registry.router)
     dp.include_router(documents.router)
     dp.include_router(menu.router)
+
+    # Кто слушает речь и кто пишет текст — решается один раз, при запуске.
+    gate.configure()
 
     dp.errors.register(on_error)
 

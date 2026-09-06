@@ -58,6 +58,7 @@ from app.models.schedule import (
 )
 from app.models.task import Task, TaskComment, TaskEvent, TaskExtension, TaskTemplate
 from app.models.user import Invite, User
+from app.models.voice import VoiceNote
 
 __all__ = [
     "Base",
@@ -124,4 +125,5 @@ __all__ = [
     "DownloadToken",
     "IndexStatus",
     "ViewChannel",
+    "VoiceNote",
 ]

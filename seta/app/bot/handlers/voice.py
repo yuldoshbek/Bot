@@ -1,8 +1,18 @@
-"""Голосовое поручение в боте.
+"""Голосовые в боте: сначала текст, потом — если нужно — поручение.
 
-Экран один: карточка черновика. Она честно говорит первой строкой, что
-поручения ещё нет, показывает разобранное и ждёт нажатия. Пока человек
-не нажал «Подтвердить», в базе не появляется ничего.
+Любое голосовое расшифровывается и показывается текстом с абзацами. Это
+основное поведение, и оно работает без ключа OpenAI: речь слушает своя
+служба, а она денег не стоит. Запись при этом сохраняется — распознавание
+ошибается, и спор «я такого не говорил» разрешается только звуком.
+
+**Поручение — отдельное действие, а не побочный эффект.** Раньше голосовое
+сразу открывало черновик поручения; но голосовые пересылают, пересказывают
+и просто шлют вместо письма, и превращать каждое в поручение неверно. Теперь
+человек видит текст, и кнопка «Сделать поручением» стоит рядом — для тех,
+у кого есть право поручать.
+
+Карточка черновика честно говорит первой строкой, что поручения ещё нет.
+Пока человек не нажал «Подтвердить», в базе не появляется ничего.
 
 Редактора здесь намеренно нет. Черновик — предложение, а не форма ввода:
 поправить исполнителя можно (без него поручения не бывает), всё остальное
@@ -21,13 +31,15 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai import voice as service
+from app.ai import gate, voice as service
+from app.core import speech
 from app.bot.utils import callback_int
 from app.core.config import settings
 from app.core.i18n import t
 from app.core.text import cut, esc
 from app.models.enums import RoleCode
 from app.models.user import User
+from app.models.voice import VoiceNote
 from app.services.rbac import Grant, has_permission
 from app.services.tasks import TaskError, allowed_assignees
 
@@ -40,43 +52,88 @@ class VoiceTask(StatesGroup):
 
 @router.message(F.voice)
 async def receive(
-    message: Message, state: FSMContext, session: AsyncSession,
+    message: Message, session: AsyncSession,
     user: User, grants: dict[str, Grant], locale: str,
 ) -> None:
-    """Голосовое → расшифровка → черновик. Поручений не создаётся."""
-    if not settings.ai_enabled:
-        # Выключенный ИИ не молчит и не ломается: он отправляет к обычному пути.
+    """Голосовое → текст. Поручений здесь не создаётся."""
+    if not gate.hearing():
+        # Ни своей службы, ни ключа. Молчать нельзя: человек ждёт ответа.
         await message.answer(t("voice.off", locale))
-        return
-    if not has_permission(grants, "task.create"):
-        await message.answer(t("voice.no_rights", locale))
         return
 
     incoming = message.voice
-    if incoming.duration and incoming.duration > service.MAX_SECONDS:
-        await message.answer(
-            t("voice.too_long", locale, limit=service.MAX_SECONDS // 60)
-        )
+    limit = service.max_seconds()
+    if incoming.duration and incoming.duration > limit:
+        await message.answer(t("voice.too_long", locale, limit=limit // 60))
         return
 
+    note = await service.remember(
+        session,
+        user=user,
+        file_id=incoming.file_id,
+        file_unique_id=incoming.file_unique_id,
+        duration_seconds=incoming.duration or 0,
+        size_bytes=incoming.file_size or 0,
+    )
     waiting = await message.answer(t("voice.listening", locale))
 
-    info = await message.bot.get_file(incoming.file_id)
-    buffer = await message.bot.download_file(info.file_path)
-    heard = await service.listen(session, buffer.read(), creator=user)
-    if not heard.worked:
+    text = note.transcript
+    if not text:
+        info = await message.bot.get_file(incoming.file_id)
+        buffer = await message.bot.download_file(info.file_path)
+        text = await service.write_down(session, note, buffer.read(), user=user)
+    if not text:
         await waiting.edit_text(t("voice.not_heard", locale))
         return
 
+    await waiting.edit_text(
+        f"<b>{t('voice.text.title', locale, length=speech.duration(note.duration_seconds))}</b>\n\n"
+        f"{esc(text)}\n\n"
+        f"<i>{t('voice.text.kept', locale)}</i>",
+        reply_markup=_after_text(note.id, grants, locale),
+    )
+
+
+def _after_text(
+    note_id: int, grants: dict[str, Grant], locale: str
+) -> InlineKeyboardMarkup | None:
+    """Что можно сделать с расшифровкой. Поручение — только тем, кто вправе."""
+    if not settings.ai_enabled or not has_permission(grants, "task.create"):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=t("voice.btn.task", locale), callback_data=f"vt:draft:{note_id}"
+    )]])
+
+
+@router.callback_query(F.data.startswith("vt:draft:"))
+async def to_task(
+    call: CallbackQuery, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant], locale: str,
+) -> None:
+    """Черновик поручения по уже расшифрованному голосовому."""
+    if not settings.ai_enabled:
+        await call.answer(t("voice.off", locale), show_alert=True)
+        return
+    if not has_permission(grants, "task.create"):
+        await call.answer(t("voice.no_rights", locale), show_alert=True)
+        return
+
+    note_id = callback_int(call.data)
+    note = await session.get(VoiceNote, note_id) if note_id else None
+    if note is None or note.organization_id != user.organization_id or not note.transcript:
+        await call.answer(t("voice.stale", locale), show_alert=True)
+        return
+
+    await call.answer()
     draft = await service.draft(
-        session, heard.text, creator=user, grants=grants
+        session, note.transcript, creator=user, grants=grants
     )
     await state.set_state(VoiceTask.confirm)
     await state.update_data(draft=draft.to_state())
     text, keyboard = await _screen(
         session, draft, viewer=user, grants=grants, locale=locale
     )
-    await waiting.edit_text(text, reply_markup=keyboard)
+    await call.message.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(VoiceTask.confirm, F.data == "vt:ok")

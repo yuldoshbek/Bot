@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.local import Local, Mixed
 from app.ai.provider import Answer, Fake, Heard, Provider, ProviderError
 from app.core.config import settings
 from app.core.timeutil import utcnow
@@ -48,6 +49,31 @@ def current() -> Provider:
     return _provider
 
 
+def configure() -> Provider:
+    """Собирает поставщика по настройкам. Вызывается при запуске.
+
+    Речь и текст разведены намеренно: своя служба расшифровки работает
+    и без ключа OpenAI, а текстовая модель без ключа не работает вовсе.
+    Поэтому голосовое читается в тексте даже при `AI_ENABLED=false` —
+    это разные умения и разные деньги.
+    """
+    text: Provider = Fake()
+    if settings.stt_url:
+        use(Mixed(voice=Local(settings.stt_url), text=text))
+    else:
+        use(text)
+    log.info("поставщик ИИ: %s", current().name)
+    return current()
+
+
+def hearing() -> bool:
+    """Есть ли кому слушать речь.
+
+    Своя служба слушает всегда; платная — только при включённом ИИ.
+    """
+    return bool(settings.stt_url) or settings.ai_enabled
+
+
 @dataclass(slots=True)
 class Outcome:
     """Что вышло. `text` пуст, если ИИ не сработал — это не ошибка."""
@@ -58,6 +84,9 @@ class Outcome:
     reason: str = ""
     call_id: int | None = None
     cost_usd: float = 0.0
+    # Расшифровка целиком, с разметкой по времени: по паузам текст разбивается
+    # на абзацы. Для текстовых вызовов остаётся пустой.
+    heard: Heard | None = None
 
     @property
     def worked(self) -> bool:
@@ -175,27 +204,36 @@ async def transcribe(
     user_id: int | None = None,
     hint: str = "",
 ) -> Outcome:
-    """Расшифровывает речь. Отдельно от разбора: это разные модели и разные цены."""
-    if not settings.ai_enabled:
+    """Расшифровывает речь. Отдельно от разбора: это разные модели и разные цены.
+
+    Бюджет проверяется только для платной расшифровки. Своя служба денег
+    не стоит, и останавливать её из-за исчерпанного потолка текстовой модели
+    значило бы выключать бесплатное вместе с платным.
+    """
+    if not hearing():
         return Outcome(reason="off")
 
-    allowed, why = await budget_left(session, organization_id)
-    if not allowed:
-        log.warning("ИИ остановлен: %s", why)
-        return Outcome(reason="budget")
+    speaker = current()
+    if not getattr(speaker, "free_voice", False):
+        allowed, why = await budget_left(session, organization_id)
+        if not allowed:
+            log.warning("ИИ остановлен: %s", why)
+            return Outcome(reason="budget")
 
     call = AiCall(
         organization_id=organization_id,
         user_id=user_id,
         kind="voice_transcribe",
-        model=settings.ai_model_voice,
+        # Какой моделью слушали. У своей службы имя приходит в ответе
+        # и дописывается ниже: журнал должен знать, кто именно расшифровал.
+        model=speaker.name if speaker.free_voice else settings.ai_model_voice,
         prompt_version="-",
     )
     session.add(call)
     await session.flush()
 
     try:
-        heard: Heard = await current().transcribe(
+        heard: Heard = await speaker.transcribe(
             audio, model=settings.ai_model_voice, hint=hint
         )
     except ProviderError as error:
@@ -208,12 +246,16 @@ async def transcribe(
     call.finished_at = utcnow()
     call.ok = True
     call.cost_usd = heard.cost_usd
+    if heard.model:
+        call.model = heard.model[:64]
     await session.flush()
 
     text = (heard.text or "").strip()
     if not text:
         return Outcome(reason="empty", call_id=call.id, cost_usd=heard.cost_usd)
-    return Outcome(text=text, ok=True, call_id=call.id, cost_usd=heard.cost_usd)
+    return Outcome(
+        text=text, ok=True, call_id=call.id, cost_usd=heard.cost_usd, heard=heard
+    )
 
 
 async def mark_confirmed(

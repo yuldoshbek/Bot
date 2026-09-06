@@ -614,6 +614,7 @@ async def with_database() -> None:
         "app/services/orgadmin.py",
         "app/services/registration.py",
         "app/bot/utils.py",
+        "app/core/speech.py",
     ]
     # Что остаётся по-русски намеренно — и почему. Список именно строк,
     # а не файлов: иначе исключение для одной подписи закрыло бы весь файл,

@@ -18,7 +18,7 @@ import logging
 
 from app.core.db import engine, session_scope
 from app.core.redis import acquire_lock, redis, release_lock
-from app.ai import summary
+from app.ai import gate, summary
 from app.services import attendance, briefing, deadlines, digest, indexer, meetings
 from app.services.health import beat, record_error
 from app.services.notifications import deliver_pending
@@ -175,6 +175,9 @@ async def index_loop() -> None:
 
 async def main() -> None:
     log.info("Фоновый обработчик запущен")
+    # Свой поставщик и у циклов: вступление к сводке пишется здесь,
+    # а собирается он из тех же настроек, что и у бота.
+    gate.configure()
     try:
         await asyncio.gather(
             delivery_loop(), deadline_loop(), meeting_loop(),

@@ -28,8 +28,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import delete, func, select
 
 from app.ai import gate, protocol, summary, voice
-from app.ai.provider import Fake
+from app.ai.local import Local, Mixed
+from app.ai.provider import Fake, ProviderError
 from app.core.config import settings
+from app.core import speech
 from app.core.dates import parse_due
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
@@ -53,6 +55,7 @@ from app.models import (
     User,
     UserRole,
     UserStatus,
+    VoiceNote,
     WorkingHours,
 )
 from app.services import decisions, digest
@@ -103,6 +106,9 @@ async def cleanup() -> None:
         )).scalars().all())
 
         await session.execute(delete(AiCall).where(AiCall.organization_id.in_(org_ids)))
+        await session.execute(
+            delete(VoiceNote).where(VoiceNote.organization_id.in_(org_ids))
+        )
         if task_ids:
             for model in (TaskEvent, TaskComment, TaskExtension):
                 await session.execute(delete(model).where(model.task_id.in_(task_ids)))
@@ -196,6 +202,7 @@ async def main() -> None:
         await stage_rights(cast)
         await stage_digest(cast)
         await stage_protocol(cast)
+        await stage_speech(cast)
     finally:
         settings.ai_enabled = was_enabled
         gate.use(Fake())
@@ -1219,6 +1226,228 @@ async def stage_protocol(cast: Cast) -> None:
         )
     check(not full.items, "предложений нет", str(len(full.items)))
     check(full.call_id is None, "и модель не звали", str(full.call_id))
+
+
+async def stage_speech(cast: Cast) -> None:
+    print("\n13. Расшифровка речи: своя служба, без ключа и без денег")
+
+    print("\n13.1. Оформление делает код, а не модель")
+    # Разбивка по паузам: единственный настоящий признак смены мысли.
+    pieces = [
+        (0.0, 1.4, "birinchi fikr"),
+        (1.6, 2.9, "davomi"),
+        (6.0, 7.2, "ikkinchi fikr"),
+    ]
+    laid = speech.pretty("", pieces)
+    check(laid.count("\n\n") == 1, "пауза развела абзацы", repr(laid))
+    check(laid.startswith("Birinchi fikr davomi"),
+          "внутри абзаца речь слитная", repr(laid))
+    check("Ikkinchi fikr" in laid, "и второй абзац с заглавной", repr(laid))
+
+    flat = speech.pretty(
+        "birinchi gap. ikkinchi gap. uchinchi gap. tortinchi gap. beshinchi gap."
+    )
+    check(flat.count("\n\n") >= 1, "без разметки по времени режем по предложениям",
+          repr(flat))
+    check(flat.startswith("Birinchi"), "первая буква заглавная", flat[:20])
+
+    # Слова не переписываются: расшифровка — свидетельство, а не черновик.
+    said = "Toshkentda Karimov bilan uchrashuv bo'ldi."
+    kept = speech.pretty(said)
+    for word in ("Toshkentda", "Karimov", "uchrashuv"):
+        check(word in kept, f"слово «{word}» не тронуто", kept)
+    messy = speech.pretty("  много   пробелов   и  , знак ")
+    check(messy == "Много пробелов и, знак",
+          "лишние пробелы убраны, пробел перед запятой тоже", repr(messy))
+    check(speech.duration(42) == "0:42" and speech.duration(725) == "12:05",
+          "длительность читается", speech.duration(725))
+
+    print("\n13.2. Своя служба — обычный поставщик за HTTP")
+    from aiohttp import web
+
+    async def answer(request: web.Request) -> web.Response:
+        form = await request.post()
+        got = form["audio"].file.read() if hasattr(form["audio"], "file") else b""
+        return web.json_response({
+            "text": "salom dunyo",
+            "model": "test-uz-small",
+            "seconds": 2.5,
+            "pieces": [[0.0, 1.0, "salom"], [1.1, 2.0, "dunyo"], ["плохо", 1, 2]],
+            "size": len(got),
+        })
+
+    server = web.Application()
+    server.router.add_post("/transcribe", answer)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 8899)
+    await site.start()
+    try:
+        local = Local(url="http://127.0.0.1:8899/transcribe")
+        heard = await local.transcribe(b"0123456789", model="ignored", hint="uz")
+        check(heard.text == "salom dunyo", "текст пришёл", heard.text)
+        check(heard.model == "test-uz-small", "и имя модели тоже", heard.model)
+        check(heard.cost_usd == 0.0, "своя служба стоит ноль", str(heard.cost_usd))
+        check(len(heard.pieces) == 2, "кривой отрезок отброшен, целые взяты",
+              str(heard.pieces))
+        check(local.free_voice, "и она объявлена бесплатной")
+
+        # Текстов служба расшифровки не пишет — и говорит об этом прямо.
+        refused = False
+        try:
+            await local.ask(system="s", user="u", model="m")
+        except ProviderError:
+            refused = True
+        check(refused, "ответить текстом отказывается")
+
+        # Смешанный поставщик: речь слушает своя, текст пишет другой.
+        mixed = Mixed(voice=local, text=Fake(answers=["текст"]))
+        check(mixed.free_voice, "смешанный берёт бесплатность у того, кто слушает")
+        both = await mixed.transcribe(b"12345", model="m")
+        written = await mixed.ask(system="s", user="u", model="m")
+        check(both.text == "salom dunyo" and written.text == "текст",
+              "каждый делает своё", f"{both.text} / {written.text}")
+    finally:
+        await runner.cleanup()
+
+    # Служба недоступна — это отказ поставщика, а не падение.
+    dead = Local(url="http://127.0.0.1:8899/transcribe")
+    broke = False
+    try:
+        await dead.transcribe(b"1", model="m")
+    except ProviderError:
+        broke = True
+    check(broke, "недоступная служба даёт отказ, а не исключение наружу")
+
+    print("\n13.3. Речь слушают и без ключа, и при исчерпанном бюджете")
+    settings.ai_enabled = False
+    was_url = settings.stt_url
+    settings.stt_url = "http://127.0.0.1:8899/transcribe"
+    free = Fake(free_voice=True, transcripts=["birinchi fikr davomi"])
+    gate.use(free)
+    try:
+        check(gate.hearing(), "своя служба слушает при выключенном ИИ")
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            outcome = await gate.transcribe(
+                session, b"audio", organization_id=cast.org, user_id=chief.id
+            )
+        check(outcome.worked, "расшифровка получена без ключа", outcome.reason)
+        check(free.calls == 1, "и служба была вызвана", str(free.calls))
+
+        # Потолок расхода — про платное. Бесплатное он останавливать не должен.
+        async with session_scope() as session:
+            session.add(AiCall(
+                organization_id=cast.org, kind="test", model="m",
+                prompt_version="v", started_at=utcnow(),
+                cost_usd=Decimal(str(settings.ai_daily_budget_usd * 2)), ok=True,
+            ))
+        async with session_scope() as session:
+            allowed, why = await gate.budget_left(session, cast.org)
+            check(not allowed, "бюджет действительно исчерпан", why)
+            spent = await gate.transcribe(
+                session, b"audio", organization_id=cast.org
+            )
+        check(spent.reason != "budget", "но своя служба не остановлена",
+              spent.reason)
+        check(free.calls == 2, "её позвали", str(free.calls))
+
+        # А платную — останавливает.
+        paid = Fake(transcripts=["не должно прозвучать"])
+        gate.use(paid)
+        settings.ai_enabled = True
+        settings.stt_url = ""
+        async with session_scope() as session:
+            stopped = await gate.transcribe(
+                session, b"audio", organization_id=cast.org
+            )
+        check(stopped.reason == "budget", "платная расшифровка остановлена бюджетом",
+              stopped.reason)
+        check(paid.calls == 0, "и не была вызвана", str(paid.calls))
+    finally:
+        async with session_scope() as session:
+            await session.execute(
+                delete(AiCall).where(
+                    AiCall.organization_id == cast.org, AiCall.kind == "test"
+                )
+            )
+        settings.stt_url = was_url
+        settings.ai_enabled = True
+
+    print("\n13.4. Голосовое сохраняется, и дважды не расшифровывается")
+    settings.stt_url = "http://127.0.0.1:8899/transcribe"
+    teller = Fake(free_voice=True, transcripts=[
+        "birinchi fikr keldi", "второй раз не должен прозвучать",
+    ], pieces=[(0.0, 1.4, "birinchi fikr"), (5.0, 6.0, "keldi")])
+    gate.use(teller)
+    settings.ai_enabled = False
+    try:
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            note = await voice.remember(
+                session, user=chief, file_id="AAA-file", file_unique_id="uniq-1",
+                duration_seconds=17, size_bytes=4096,
+            )
+            first = await voice.write_down(session, note, b"audio", user=chief)
+            note_id = note.id
+        check(first, "расшифровка получена", first[:40])
+        check("\n\n" in first, "и оформлена абзацами по паузам", repr(first))
+
+        async with session_scope() as session:
+            saved = await session.get(VoiceNote, note_id)
+            check(saved.file_id == "AAA-file", "ссылка на запись сохранена",
+                  saved.file_id)
+            check(saved.duration_seconds == 17, "длительность сохранена")
+            check(saved.transcript == first, "расшифровка легла рядом с записью")
+            check(saved.model, "и модель, которой слушали", str(saved.model))
+
+        # То же голосовое второй раз: запись та же, слушать заново незачем.
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            again = await voice.remember(
+                session, user=chief, file_id="BBB-other", file_unique_id="uniq-1",
+                duration_seconds=17, size_bytes=4096,
+            )
+            second = await voice.write_down(session, again, b"audio", user=chief)
+        check(again.id == note_id, "запись найдена, а не заведена заново",
+              f"{note_id} → {again.id}")
+        check(second == first, "расшифровка та же")
+        check(teller.calls == 1, "и служба второй раз не звалась",
+              str(teller.calls))
+
+        async with session_scope() as session:
+            total = await session.scalar(select(func.count(VoiceNote.id)).where(
+                VoiceNote.organization_id == cast.org
+            ))
+        check(total == 1, "и запись в базе одна", str(total))
+
+        print("\n13.5. Не расшифровали — запись всё равно осталась")
+        gate.use(Fake(free_voice=True, fail=True))
+        async with session_scope() as session:
+            chief = await session.get(User, cast.chief)
+            silent = await voice.remember(
+                session, user=chief, file_id="CCC", file_unique_id="uniq-2",
+                duration_seconds=5, size_bytes=100,
+            )
+            nothing = await voice.write_down(session, silent, b"audio", user=chief)
+            silent_id = silent.id
+        check(nothing == "", "текста нет", repr(nothing))
+        async with session_scope() as session:
+            kept_note = await session.get(VoiceNote, silent_id)
+        check(kept_note is not None, "но запись сохранена")
+        check(kept_note.transcript is None, "и помечена нерасшифрованной",
+              str(kept_note.transcript))
+
+        # Предел длины следует за ценой: бесплатной службе длинное не жалко.
+        gate.use(Fake(free_voice=True))
+        check(voice.max_seconds() == voice.FREE_MAX_SECONDS,
+              "своей службе предел больше", str(voice.max_seconds()))
+        gate.use(Fake())
+        check(voice.max_seconds() == voice.MAX_SECONDS,
+              "платной — меньше", str(voice.max_seconds()))
+    finally:
+        settings.stt_url = was_url
+        settings.ai_enabled = True
 
 
 if __name__ == "__main__":
