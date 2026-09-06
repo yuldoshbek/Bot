@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dates import humanize_due
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import to_local, to_utc, utcnow
 from app.models.enums import (
@@ -52,6 +53,28 @@ ACTIVE_STATUSES = (
     TaskStatus.OVERDUE,
 )
 
+# Значок — не язык, поэтому он остаётся в коде, а не уезжает в словарь:
+# цвет статуса одинаков на всех языках, и от качества перевода не зависит.
+STATUS_MARKS: dict[TaskStatus, str] = {
+    TaskStatus.NEW: "🔵",
+    TaskStatus.ACKNOWLEDGED: "🔵",
+    TaskStatus.IN_PROGRESS: "🟡",
+    TaskStatus.REVIEW: "🟠",
+    TaskStatus.DONE: "🟢",
+    TaskStatus.BLOCKED: "🟠",
+    TaskStatus.OVERDUE: "🔴",
+    TaskStatus.CANCELLED: "⚫",
+}
+
+PRIORITY_MARKS: dict[Priority, str] = {
+    Priority.LOW: "",
+    Priority.NORMAL: "",
+    Priority.HIGH: "🔴",
+    Priority.CRITICAL: "🔴",
+}
+
+# Русские названия остаются для выгрузок и журнала: файл Excel открывают
+# в бухгалтерии, а не в боте, и язык получателя там неизвестен.
 STATUS_LABELS: dict[TaskStatus, str] = {
     TaskStatus.NEW: "🔵 Новое",
     TaskStatus.ACKNOWLEDGED: "🔵 Принято",
@@ -69,6 +92,23 @@ PRIORITY_LABELS: dict[Priority, str] = {
     Priority.HIGH: "🔴 Высокий",
     Priority.CRITICAL: "🔴 Критичный",
 }
+
+
+def status_title(status: TaskStatus | str, locale: str | None = None) -> str:
+    """Статус поручения на языке человека, со значком."""
+    value = status.value if isinstance(status, TaskStatus) else str(status)
+    mark = STATUS_MARKS.get(TaskStatus(value), "")
+    word = t(f"task.status.{value.lower()}", locale)
+    return f"{mark} {word}".strip()
+
+
+def priority_title(priority: Priority | str, locale: str | None = None) -> str:
+    """Приоритет на языке человека. У обычного значка нет — и не должно быть:
+    значок на каждом поручении перестаёт что-либо выделять."""
+    value = priority.value if isinstance(priority, Priority) else str(priority)
+    mark = PRIORITY_MARKS.get(Priority(value), "")
+    word = t(f"priority.{value.lower()}", locale)
+    return f"{mark} {word}".strip()
 
 
 class TaskError(Exception):

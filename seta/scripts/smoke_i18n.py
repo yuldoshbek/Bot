@@ -306,7 +306,15 @@ def main() -> None:
               str(got.astimezone(TZ_TASHKENT).date() if got else None))
 
     print("\n15. Срок называется на языке собеседника")
-    tomorrow = now.replace(hour=6) + __import__("datetime").timedelta(days=1)
+    # Момент берётся от настоящих часов, а не от подставного `now` выше:
+    # `humanize_due` сравнивает срок с сегодняшним днём по реальному времени,
+    # и «завтра» от сентября 2026 года было бы «завтра» ровно один день в году.
+    # Проверка проходила накануне и падала на следующие сутки.
+    from datetime import timedelta as _td
+
+    from app.core.timeutil import utcnow as _utcnow
+
+    tomorrow = _utcnow() + _td(days=1)
     said = {loc: humanize_due(tomorrow, "Asia/Tashkent", loc) for loc in LOCALES}
     check(len(set(said.values())) == 3, "три языка — три разных ответа", str(said))
     check(said["ru"].startswith("Завтра"), "по-русски «Завтра»", said["ru"])
@@ -332,13 +340,21 @@ async def with_database() -> None:
 
     async def cleanup() -> None:
         async with session_scope() as session:
-            org_id = await session.scalar(
+            # Все организации с этим именем, а не первая попавшаяся: проверка
+            # заводит её дважды, и уборка «по одному найденному» оставляла
+            # вторую в базе — а следующий прогон находил уже её.
+            org_ids = list((await session.execute(
                 select(Organization.id).where(Organization.name == ORG)
-            )
-            if org_id:
+            )).scalars().all())
+            if org_ids:
                 # Только по organization_id: чужие записи не трогаем никогда.
-                await session.execute(delete(User).where(User.organization_id == org_id))
-                await session.execute(delete(Organization).where(Organization.id == org_id))
+                from app.models.task import Task as TaskRow
+
+                await session.execute(
+                    delete(TaskRow).where(TaskRow.organization_id.in_(org_ids))
+                )
+                await session.execute(delete(User).where(User.organization_id.in_(org_ids)))
+                await session.execute(delete(Organization).where(Organization.id.in_(org_ids)))
 
     await cleanup()
     print("\n16. Язык хранится у человека и меняет ответ")
@@ -376,6 +392,132 @@ async def with_database() -> None:
         check(await button(Pressed(after)), "и новую тоже", after)
         check(not await button(Pressed("что-то postороннее")),
               "а на чужой текст не срабатывает")
+
+    print("\n17. Карточка поручения говорит на языке смотрящего")
+    # Проверка поведения, а не наличия ключей: карточку собирают полтора десятка
+    # вызовов, и достаточно одному забыть язык, чтобы русскоязычный человек
+    # увидел узбекскую строку посреди русской карточки. Ключи при этом на месте,
+    # и проверка словарей такого не заметит.
+    from app.bot.handlers.tasks import _render_task
+    from app.models.enums import Priority, TaskStatus
+    from app.models.task import Task
+    from app.services.tasks import priority_title, status_title
+
+    async with session_scope() as session:
+        org = Organization(name=ORG, timezone="Asia/Tashkent")
+        session.add(org)
+        await session.flush()
+        boss = User(organization_id=org.id, telegram_user_id=999_000_222,
+                    full_name="ТЕСТ Каримов", status=UserStatus.ACTIVE,
+                    timezone="Asia/Tashkent")
+        hand = User(organization_id=org.id, telegram_user_id=999_000_333,
+                    full_name="ТЕСТ Юсупов", status=UserStatus.ACTIVE,
+                    timezone="Asia/Tashkent")
+        session.add_all([boss, hand])
+        await session.flush()
+        card = Task(
+            organization_id=org.id, creator_id=boss.id, assignee_id=hand.id,
+            title="ТЕСТ карточка на трёх языках", status=TaskStatus.IN_PROGRESS,
+            priority=Priority.CRITICAL,
+        )
+        session.add(card)
+        await session.flush()
+
+        rendered = {
+            loc: await _render_task(session, card, boss, loc) for loc in LOCALES
+        }
+        check(len({v for v in rendered.values()}) == 3,
+              "три языка — три разные карточки",
+              str({k: v[:40] for k, v in rendered.items()}))
+
+        # Ожидаемое берётся из словаря напрямую, а не через ту же функцию,
+        # что собирает карточку. Проверка, зовущая проверяемое, подтверждает
+        # только то, что код вызывает сам себя: убери значок из `status_title` —
+        # и `status_title(...) in карточка` останется истинным.
+        check("🟡" in rendered["ru"], "значок статуса на месте", rendered["ru"][:60])
+        check("🔴" in rendered["ru"], "и значок важности тоже", rendered["ru"][:60])
+        check(UZ["task.status.in_progress"] in rendered["uz"],
+              "узбекская карточка: статус словом из словаря", rendered["uz"][:60])
+        check(RU["task.status.in_progress"] in rendered["ru"],
+              "русская карточка: статус словом из словаря", rendered["ru"][:60])
+        check(RU["priority.critical"] in rendered["ru"],
+              "и важность тоже", rendered["ru"][:60])
+
+        # Ни одна подпись поля не должна остаться на чужом языке. Проверяются
+        # все подписи разом, а не одно слово: забытый `t` на любой из них
+        # выглядит одинаково — русская строка посреди узбекской карточки.
+        # Имена людей здесь намеренно не совпадают ни с одним словом словаря:
+        # «ТЕСТ Исполнитель» — это одновременно имя и подпись поля, и проверка
+        # на утечку подписи срабатывала на имени, а не на ошибке.
+        CARD_KEYS = [
+            "task.field.status", "task.field.assignee", "task.field.author",
+            "task.field.priority", "task.status.in_progress", "priority.critical",
+        ]
+        ru_leaks = [k for k in CARD_KEYS if RU[k] in rendered["uz"]]
+        uz_leaks = [k for k in CARD_KEYS if UZ[k] in rendered["ru"]]
+        check(not ru_leaks, "в узбекской карточке нет русских подписей", str(ru_leaks))
+        check(not uz_leaks, "а в русской — узбекских", str(uz_leaks))
+
+        # Самая сильная проверка из всех: карточка с латинскими данными,
+        # собранная по-узбекски, не должна содержать кириллицы вовсе. Проверка
+        # выше ловит только те русские слова, что есть в словаре, — а забытая
+        # строка могла быть написана иначе, чем её перевод («Статус» в коде
+        # против «Состояние» в словаре), и тогда утечка проходит незамеченной.
+        # Все необязательные строки карточки включены разом. Иначе проверка
+        # не доходит до половины из них: «на личном контроле» и «проверяет»
+        # печатаются только при своих условиях, и забытый там перевод
+        # проверка с пустым поручением не увидит.
+        latin = Task(
+            organization_id=org.id, creator_id=boss.id, assignee_id=hand.id,
+            on_behalf_of_id=boss.id,
+            title="TEST lotin yozuvidagi kartochka", status=TaskStatus.REVIEW,
+            priority=Priority.HIGH,
+            description="TEST tavsif matni",
+            requires_review=True, reviewer_id=boss.id,
+            personal_control=True, rework_count=2, extensions_count=1,
+        )
+        boss.full_name, hand.full_name = "TEST Karimov", "TEST Yusupov"
+        session.add(latin)
+        await session.flush()
+
+        only_latin = await _render_task(session, latin, boss, "uz")
+        strays = sorted(set(re.findall(r"[А-Яа-яЁё]+", only_latin)))
+        check(not strays, "в узбекской карточке не осталось ни одного русского слова",
+              str(strays[:6]))
+
+        # Список — тем же способом.
+        boss.full_name, hand.full_name = "ТЕСТ Каримов", "ТЕСТ Юсупов"
+        await session.flush()
+
+        # Список поручений собирается отдельно от карточки и своим кодом.
+        # Забытый там язык карточка не покажет.
+        from app.bot.handlers.tasks import _show_bucket
+
+        class Caught:
+            """Ловит текст вместо отправки в Telegram."""
+
+            def __init__(self) -> None:
+                self.text = ""
+
+            async def answer(self, text, **kwargs):
+                self.text = text
+
+            async def edit_text(self, text, **kwargs):
+                self.text = text
+
+        listed = {}
+        for loc in LOCALES:
+            sink = Caught()
+            await _show_bucket(sink, session, hand, "active", loc)
+            listed[loc] = sink.text
+        check(len(set(listed.values())) == 3, "список тоже на трёх языках",
+              str({k: v[:40] for k, v in listed.items()}))
+        check(UZ["task.list.active"] in listed["uz"],
+              "узбекский список подписан по-узбекски", listed["uz"][:60])
+        check(RU["task.list.active"] in listed["ru"],
+              "русский — по-русски", listed["ru"][:60])
+        check(RU["task.status.in_progress"] not in listed["uz"],
+              "и статус в узбекском списке не русский", listed["uz"][:80])
 
     await cleanup()
     async with session_scope() as session:
