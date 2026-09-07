@@ -1073,4 +1073,16 @@ TABLE: dict[str, str] = {
     "meeting.status.finished": "Yakunlangan",
     "meeting.status.cancelled": "Bekor qilingan",
 
+    # ── Mini App ──
+    "miniapp.button": "Ilova",
+
+    # ── Mini App ──
+    "app.loading": "Yuklanmoqda…",
+    "app.offline": "Aloqa yoʻq. Internetni tekshiring va yangilang.",
+    "app.retry": "Yangilash",
+    "app.meetings_none": "Uchrashuvlar yoʻq.",
+    "app.denied": "Ruxsat ochilmagan. Roʻyxatdan oʻtishni chatda yakunlang.",
+    "app.in_bot": "Qolgani — chatda",
+    "app.no_data": "Maʼlumot yoʻq",
+
 }

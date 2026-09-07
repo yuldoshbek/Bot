@@ -1066,4 +1066,16 @@ TABLE: dict[str, str] = {
     "meeting.status.finished": "Завершена",
     "meeting.status.cancelled": "Отменена",
 
+    # ── Mini App ──
+    "miniapp.button": "Приложение",
+
+    # ── Mini App ──
+    "app.loading": "Загружаем…",
+    "app.offline": "Нет связи. Проверьте интернет и обновите.",
+    "app.retry": "Обновить",
+    "app.meetings_none": "Встреч нет.",
+    "app.denied": "Доступ не открыт. Завершите регистрацию в чате.",
+    "app.in_bot": "Остальное — в чате",
+    "app.no_data": "Нет данных",
+
 }

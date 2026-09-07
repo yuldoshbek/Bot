@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.utils import callback_int
+from app.bot import webapp
 from app.bot.keyboards.common import (
     approval_kb,
     department_choice_kb,
@@ -71,6 +72,9 @@ async def cmd_start(
 ) -> None:
     if user is not None and user.status == UserStatus.ACTIVE:
         await state.clear()
+        # Кнопка приложения — на языке этого человека. Здесь язык известен,
+        # а у общей кнопки он основной для системы.
+        await webapp.set_for(message.bot, message.chat.id, locale)
         await message.answer(
             await greeting(session, user, roles, locale),
             reply_markup=main_menu(roles, features, locale),

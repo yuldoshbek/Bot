@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot import webapp
 from app.bot.keyboards.common import (
     MENU_HELP,
     MENU_PROFILE,
@@ -117,6 +118,10 @@ async def switch_language(
 
     user.locale = chosen
     await session.flush()
+
+    # Надпись на кнопке приложения тоже принадлежит человеку, а не системе:
+    # оставленная на прежнем языке, она пережила бы переключение.
+    await webapp.set_for(call.bot, call.message.chat.id, chosen)
 
     await call.message.edit_text(
         await _profile_text(session, user, roles, chosen),

@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.db import engine, session_scope
 from app.core.redis import redis
 from app.api.health_page import render
+from app.api import cors
 from app.api.v1 import routes as v1_routes
 from app.core.timeutil import utcnow
 from app.services.bootstrap import bootstrap
@@ -53,6 +54,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SETA API", version="1.0", lifespan=lifespan)
+# Приложение лежит на другом адресе, и без этого разрешения браузер заблокирует
+# каждый его запрос — молча, до всякой проверки подписи. Адрес не задан —
+# слоя нет вовсе: разрешать нечего, пока приложения нет.
+cors.apply(app)
 api_v1 = APIRouter(prefix="/api/v1")
 # Маршруты Mini App: чтение под подписью Telegram. Права проверяют те же
 # службы, что отвечают боту, — второго описания прав в проекте нет.

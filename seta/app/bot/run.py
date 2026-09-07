@@ -21,6 +21,7 @@ from app.bot.handlers import (
     voice,
 )
 from app.ai import gate
+from app.bot import webapp
 from app.bot.loader import bot, dp
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.config import settings
@@ -114,6 +115,10 @@ async def main() -> None:
 
     me = await bot.get_me()
     log.info("Бот запущен: @%s", me.username)
+
+    # Кнопка приложения ставится при запуске — и снимается им же, если адрес
+    # убрали: иначе она осталась бы в чатах, открывая то, чего больше нет.
+    await webapp.set_default(bot)
 
     if settings.bot_mode == "webhook":
         # Апдейты принимает API. Процесс не завершается: иначе restart-политика

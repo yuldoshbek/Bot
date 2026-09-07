@@ -39,6 +39,27 @@ PAGE = 30
 # Горизонт календаря по умолчанию — две недели, как в «Моих встречах».
 CALENDAR_DAYS = 14
 
+# Подписи, которые приложение рисует само: названия вкладок, разрезы списка,
+# пустые состояния, отказы. Отдаются отсюда, из того же словаря, что у бота.
+#
+# Второй словарь внутри приложения — самое очевидное и самое плохое решение:
+# он разошёлся бы с первым молча, и человек видел бы в чате одно название
+# раздела, а в приложении другое. К тому же переводить пришлось бы дважды,
+# а вычитывает узбекский владелец — один раз.
+#
+# Список закрытый: приложение пользуется только этими ключами, и это
+# проверяется по его исходнику.
+WORDS = (
+    "menu.my_day", "menu.my_tasks", "menu.my_meetings", "menu.decisions",
+    "task.list.title", "task.list.empty",
+    "task.list.active", "task.list.today", "task.list.overdue",
+    "task.list.review", "task.list.created", "task.list.done",
+    "decision.registry", "decision.none",
+    "error.not_found", "error.failed", "error.section_closed",
+    "app.loading", "app.offline", "app.retry",
+    "app.meetings_none", "app.denied", "app.in_bot", "app.no_data",
+)
+
 
 def _need(call: Caller, code: str) -> None:
     """Раздел выключен администратором — API молчит так же, как бот."""
@@ -81,6 +102,11 @@ async def me(call: Caller = Depends(caller)) -> dict:
         # Приложение рисует только включённые разделы — тот же список,
         # по которому бот собирает нижнее меню.
         "features": call.features,
+        # Разрезы списка поручений — те же, что кнопками в боте, и в том же
+        # порядке. Приложение не перечисляет их у себя: разошлись бы.
+        "buckets": list(task_service.BUCKETS),
+        # Подписи интерфейса приложения из общего словаря.
+        "words": {key: t(key, call.locale) for key in WORDS},
     }
 
 

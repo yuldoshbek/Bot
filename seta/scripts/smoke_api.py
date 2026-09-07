@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import sys
 import time
 from datetime import timedelta
@@ -31,6 +32,8 @@ import httpx
 from sqlalchemy import delete, select
 
 from app.core.config import settings
+from app.core.i18n import LOCALES, t
+from app.i18n.uz import TABLE as CATALOGUE
 from app.core.db import session_scope
 from app.core.timeutil import utcnow
 from app.models import Department, Organization, Task, TaskStatus, User, UserStatus
@@ -184,6 +187,8 @@ async def main() -> None:
         await stage_reading(client, people)
         await stage_agreement(client, people)
         await stage_rate(client)
+    await stage_miniapp()
+    await stage_words()
 
     await cleanup()
     async with session_scope() as session:
@@ -209,6 +214,214 @@ def _app():
     app = FastAPI()
     app.include_router(v1_routes.router, prefix="/api/v1")
     return app
+
+
+# ── Mini App: разрешение браузеру и кнопка ──────────────────────────────────
+APP_URL = "https://seta-test.vercel.app"
+ALIEN = "https://chuzhoy.example"
+
+
+def _cors_app(miniapp_url: str):
+    """Приложение с тем же правилом CORS, что и боевое.
+
+    Правило ставится общей функцией, а не переписывается здесь: проверка,
+    собравшая своё правило, проверяет своё правило.
+    """
+    from fastapi import FastAPI
+
+    from app.api import cors
+    from app.api.v1 import routes as v1_routes
+
+    was = settings.miniapp_url
+    settings.miniapp_url = miniapp_url
+    try:
+        app = FastAPI()
+        allowed = cors.apply(app)
+        app.include_router(v1_routes.router, prefix="/api/v1")
+        return app, allowed
+    finally:
+        settings.miniapp_url = was
+
+
+async def _preflight(app, origin: str) -> httpx.Response:
+    """Предварительный запрос браузера: можно ли вообще обращаться."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://api") as client:
+        return await client.options(
+            "/api/v1/me",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-telegram-init-data",
+            },
+        )
+
+
+async def stage_miniapp() -> None:
+    print("\n6. Приложению разрешено, чужому адресу — нет")
+    from app.api import cors
+
+    print("\n6.1. Адрес не задан — правила нет вовсе")
+    app, allowed = _cors_app("")
+    check(allowed == [], "разрешать некому, пока приложения нет", str(allowed))
+    answer = await _preflight(app, APP_URL)
+    check("access-control-allow-origin" not in answer.headers,
+          "и звёздочка «на всякий случай» не появляется",
+          str(dict(answer.headers)))
+
+    print("\n6.2. Адрес задан — разрешён ровно он")
+    app, allowed = _cors_app(APP_URL)
+    check(allowed == [APP_URL], "разрешён источник приложения", str(allowed))
+    answer = await _preflight(app, APP_URL)
+    check(answer.headers.get("access-control-allow-origin") == APP_URL,
+          "браузеру приложения отвечают «можно»",
+          answer.headers.get("access-control-allow-origin", "—"))
+    allowed_headers = answer.headers.get("access-control-allow-headers", "").lower()
+    check(cors.INIT_DATA_HEADER.lower() in allowed_headers,
+          "и заголовок с подписью разрешён поимённо", allowed_headers)
+
+    # Маршрутов записи в API нет. Разрешённый заранее метод записи однажды
+    # встретится с появившимся маршрутом, и никто этого не заметит.
+    allowed_methods = answer.headers.get("access-control-allow-methods", "").upper()
+    check("POST" not in allowed_methods and "DELETE" not in allowed_methods,
+          "методы записи не разрешены", allowed_methods)
+    # Печенья не используются: приложение представляется подписью на каждом
+    # запросе. Второй способ узнать человека однажды окажется главным.
+    check("access-control-allow-credentials" not in answer.headers,
+          "и печенья не разрешены",
+          answer.headers.get("access-control-allow-credentials", "—"))
+
+    # Без этого проверка доказывала бы только то, что заголовок вообще есть.
+    answer = await _preflight(app, ALIEN)
+    granted = answer.headers.get("access-control-allow-origin", "")
+    # Сравнения «не равно чужому адресу» мало: звёздочка ему тоже не равна,
+    # а разрешает всех сразу. Отказом считается только отсутствие разрешения.
+    check(granted not in (ALIEN, "*"), "а чужому адресу — нет", granted or "—")
+
+    print("\n6.3. Источник — схема и хост, без пути")
+    app, allowed = _cors_app(APP_URL + "/day?tab=tasks")
+    check(allowed == [APP_URL], "путь и параметры в источник не входят", str(allowed))
+    answer = await _preflight(app, APP_URL)
+    check(answer.headers.get("access-control-allow-origin") == APP_URL,
+          "и адрес с путём всё равно работает")
+
+    # Забытая схема — самая частая опечатка в адресе. Она не должна выглядеть
+    # как «приложение просто не отвечает»: правила нет, и в журнале сказано почему.
+    app, allowed = _cors_app("seta-test.vercel.app")
+    check(allowed == [], "адрес без схемы разрешением не становится", str(allowed))
+
+    print("\n6.4. Разрешение — не рубеж доступа")
+    # Подпись проверяется до и независимо: запрос с разрешённого адреса,
+    # но без подписи, не получает ничего.
+    app, _ = _cors_app(APP_URL)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://api") as client:
+        answer = await client.get("/api/v1/me", headers={"Origin": APP_URL})
+    check(answer.status_code == 401,
+          "свой адрес без подписи не открывает ничего", str(answer.status_code))
+
+    print("\n6.5. Кнопка приложения появляется вместе с адресом")
+    from aiogram.types import MenuButtonCommands, MenuButtonWebApp
+
+    from app.bot import webapp
+
+    was = settings.miniapp_url
+    try:
+        settings.miniapp_url = ""
+        check(not webapp.configured(), "адреса нет — приложения нет")
+        check(isinstance(webapp.button("ru"), MenuButtonCommands),
+              "и кнопка обычная, а не открывающая пустоту")
+
+        settings.miniapp_url = APP_URL
+        check(webapp.configured(), "адрес задан — приложение есть")
+        button = webapp.button("ru")
+        check(isinstance(button, MenuButtonWebApp), "кнопка открывает приложение")
+        check(button.web_app.url == APP_URL, "по заданному адресу", button.web_app.url)
+        # Надпись принадлежит человеку, а не системе.
+        titles = {webapp.button(locale).text for locale in ("uz", "ru")}
+        check(len(titles) == 2, "надпись на языке человека", str(sorted(titles)))
+    finally:
+        settings.miniapp_url = was
+
+
+# ── Приложение и словарь ────────────────────────────────────────────────────
+# Ключи, которые приложение собирает на ходу: `w(`task.list.${разрез}`)`.
+# Разбор литералов такие не видит, поэтому они называются здесь и сверяются
+# с тем же перечнем разрезов, что отдаёт сервер.
+COMPUTED = tuple(f"task.list.{bucket}" for bucket in task_service.BUCKETS)
+
+# Похоже на ключ словаря: «app.loading», «task.list.done». Строки вида
+# «2-digit», «react-dom/client» и «/api/v1/tasks» под правило не подходят.
+KEY_LIKE = re.compile(r"^[a-z][a-z_]*(?:\.[a-z][a-z_0-9]*)+$")
+QUOTED = re.compile(r"\"([^\"\n]*)\"|'([^'\n]*)'|`([^`\n]*)`")
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+LINE_COMMENT = re.compile(r"(?<![:\"'`])//[^\n]*")
+
+
+def _sources() -> list[Path]:
+    root = Path(__file__).resolve().parents[1] / "miniapp" / "src"
+    return sorted(root.rglob("*.ts")) + sorted(root.rglob("*.tsx"))
+
+
+def _code(path: Path) -> str:
+    """Исходник без комментариев. Комментарии в проекте русские, и без этого
+    проверка на русские строки ловила бы их, а не строки."""
+    text = path.read_text(encoding="utf-8")
+    text = BLOCK_COMMENT.sub(" ", text)
+    return LINE_COMMENT.sub(" ", text)
+
+
+async def stage_words() -> None:
+    print("\n7. Приложение и словарь не расходятся")
+    from app.api.v1.routes import WORDS
+
+    files = _sources()
+    check(len(files) >= 8, f"исходники приложения найдены: {len(files)}")
+
+    print("\n7.1. Приложение просит только те подписи, что ему отдают")
+    # Берутся все строки, похожие на ключ словаря, а не только известные:
+    # опечатка в имени ключа — ровно та ошибка, ради которой проверка есть,
+    # и сверка со словарём её бы пропустила, посчитав строку не ключом.
+    asked: set[str] = set()
+    for path in files:
+        for found in QUOTED.finditer(_code(path)):
+            value = found.group(1) or found.group(2) or found.group(3) or ""
+            if KEY_LIKE.match(value):
+                asked.add(value)
+    check(asked, "ключи словаря в приложении найдены", str(len(asked)))
+    outside = sorted(asked - set(WORDS))
+    check(not outside, "и каждый из них сервер отдаёт", str(outside))
+    check(all(key in CATALOGUE for key in WORDS),
+          "а каждая отданная подпись есть в словаре",
+          str(sorted(set(WORDS) - set(CATALOGUE))))
+
+    print("\n7.2. Ключи, собранные на ходу, сверены с перечнем разрезов")
+    # Разрезы приходят из `me.buckets`, а подписи к ним — `task.list.<разрез>`.
+    # Добавленный разрез без подписи показал бы человеку имя ключа кнопкой.
+    missing = sorted(key for key in COMPUTED if key not in WORDS)
+    check(not missing, "у каждого разреза списка есть подпись", str(missing))
+
+    print("\n7.3. Отданное — используется")
+    # Обратное так же важно: подпись, которую никто не просит, — это либо
+    # забытый экран, либо опечатка в имени ключа.
+    idle = sorted(set(WORDS) - asked - set(COMPUTED))
+    check(not idle, "лишних подписей не отдаётся", str(idle))
+
+    print("\n7.4. Каждая отданная подпись существует на всех языках")
+    for locale in LOCALES:
+        unknown = sorted(key for key in WORDS if t(key, locale) == key)
+        check(not unknown, f"{locale}: подписи на месте", str(unknown[:5]))
+
+    print("\n7.5. Своих слов у приложения нет")
+    # Всё видимое проходит через словарь. Строка, набранная в приложении
+    # руками, не переводится ничем и остаётся русской у узбекского читателя.
+    for path in files:
+        strays = sorted({
+            (found.group(1) or found.group(2) or found.group(3) or "")
+            for found in QUOTED.finditer(_code(path))
+            if re.search(r"[А-Яа-яЁё]", found.group(0))
+        })
+        check(not strays, f"{path.name}: русских строк нет", str(strays[:3]))
 
 
 async def stage_entry(client: httpx.AsyncClient) -> None:
