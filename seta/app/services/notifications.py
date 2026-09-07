@@ -14,6 +14,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.timeutil import in_quiet_hours, next_quiet_hours_end, utcnow
 from app.models.enums import NotificationPriority, NotificationStatus
 from app.models.notification import Notification
@@ -213,11 +214,17 @@ async def suppress_for_user(session: AsyncSession, ids: list[int]) -> None:
     )
 
 
-def group_messages(items: list[Notification]) -> list[tuple[list[int], str]]:
+def group_messages(
+    items: list[Notification], locale: str | None = None
+) -> list[tuple[list[int], str]]:
     """Собирает сообщения одного человека в пачки.
 
     Критичные всегда идут отдельно. Остальные, если их накопилось много,
     объединяются в одно сообщение - вместо пяти уведомлений подряд.
+
+    Пачка собирается для одного человека, поэтому язык у неё один — его.
+    Сами письма уже пришли переведёнными: каждое собиралось при постановке
+    в очередь и знало своего получателя.
     """
     critical = [n for n in items if n.priority == NotificationPriority.CRITICAL]
     ordinary = [n for n in items if n.priority != NotificationPriority.CRITICAL]
@@ -235,15 +242,15 @@ def group_messages(items: list[Notification]) -> list[tuple[list[int], str]]:
     # превысило бы предел Telegram и потерялось бы целиком вместе со всей группой.
     for start in range(0, len(ordinary), GROUP_MAX_ITEMS):
         chunk = ordinary[start : start + GROUP_MAX_ITEMS]
-        lines = [f"📋 <b>Обновления по вашим поручениям: {len(chunk)}</b>", ""]
+        lines = [t("notify.group_titled", locale, count=len(chunk)), ""]
         ids: list[int] = []
         length = len(lines[0])
         for item in chunk:
             body = item.body.strip().splitlines()
-            first_line = body[0] if body else "обновление"
+            first_line = body[0] if body else t("notify.update", locale)
             if length + len(first_line) > GROUP_MAX_CHARS and ids:
                 result.append((ids, "\n".join(lines)))
-                lines = [f"📋 <b>Обновления по вашим поручениям</b>", ""]
+                lines = [t("notify.group", locale), ""]
                 ids, length = [], len(lines[0])
             lines.append(f"• {first_line}")
             ids.append(item.id)
@@ -285,7 +292,7 @@ async def deliver_pending(
             await suppress_for_user(session, [n.id for n in user_items])
             continue
 
-        for ids, text in group_messages(user_items):
+        for ids, text in group_messages(user_items, user.locale):
             try:
                 await send(user.telegram_user_id, text)
                 await mark_sent(session, ids)

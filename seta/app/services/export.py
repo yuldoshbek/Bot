@@ -161,6 +161,32 @@ async def _names(session: AsyncSession, ids: set[int]) -> dict[int, str]:
     return {row[0]: row[1] for row in rows.all()}
 
 
+# Знаки, с которых Excel начинает читать содержимое ячейки как формулу.
+FORMULA_STARTERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _append_as_text(page, row: list[str]) -> None:
+    """Пишет строку так, чтобы текст от человека остался текстом.
+
+    `openpyxl` сам решает, что строка, начинающаяся с `=`, — это формула,
+    и пишет её в ячейку формулой. Поручение с названием `=cmd|'/c calc'!A1`
+    стало бы исполняемой ячейкой у того, кто откроет отчёт. Это тот же случай,
+    что `esc()` для сообщений: текст от человека нигде не должен становиться
+    разметкой или кодом.
+
+    Значение не искажается: тип ячейки меняется на строковый, а `quotePrefix`
+    помечает её как заведомо текстовую — на случай, если содержимое скопируют
+    в другую таблицу.
+    """
+    page.append(row)
+    index = page.max_row
+    for column, value in enumerate(row, start=1):
+        if isinstance(value, str) and value.startswith(FORMULA_STARTERS):
+            cell = page.cell(row=index, column=column)
+            cell.data_type = "s"
+            cell.quotePrefix = True
+
+
 def to_xlsx(sheet: Sheet) -> bytes:
     """Таблица в Excel. Ширина колонок подбирается по содержимому."""
     from openpyxl import Workbook
@@ -174,7 +200,7 @@ def to_xlsx(sheet: Sheet) -> bytes:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(vertical="center")
     for row in sheet.rows:
-        page.append(row)
+        _append_as_text(page, row)
 
     for index, column in enumerate(sheet.columns, start=1):
         width = max([len(column)] + [len(str(r[index - 1])) for r in sheet.rows] + [8])

@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.i18n import t
 from app.core.timeutil import utcnow
 from app.models.enums import RoleCode, UserStatus
 from app.models.org import Department, Organization
@@ -138,7 +139,8 @@ async def start_registration(
     """Создаёт пользователя. По ссылке отдела активирует сразу, иначе ставит в очередь заявок."""
     existing = await get_user_by_telegram_id(session, telegram_user_id)
     if existing is not None:
-        raise RegistrationError("Вы уже зарегистрированы в системе.")
+        # Язык — у самого человека: он уже есть в базе, и отказ читает он.
+        raise RegistrationError(t("start.already_registered", existing.locale))
 
     # Роль из приглашения имеет приоритет над тем, что человек выбрал сам.
     effective_role = RoleCode(invite.role) if invite else requested_role

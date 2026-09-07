@@ -1,3 +1,4 @@
+from app.models.ai import AiCall
 from app.models.audit import AuditLog
 from app.models.base import Base
 from app.models.error import ErrorLog
@@ -45,7 +46,7 @@ from app.models.meeting import (
     TimeQuota,
 )
 from app.models.notification import Notification
-from app.models.org import Department, Organization
+from app.models.org import Department, FeatureFlag, Organization
 from app.models.rbac import Delegation, Permission, Role, RolePermission, UserRole
 from app.models.schedule import (
     Absence,
@@ -57,11 +58,13 @@ from app.models.schedule import (
 )
 from app.models.task import Task, TaskComment, TaskEvent, TaskExtension, TaskTemplate
 from app.models.user import Invite, User
+from app.models.voice import VoiceNote
 
 __all__ = [
     "Base",
     "Organization",
     "Department",
+    "FeatureFlag",
     "User",
     "Invite",
     "Role",
@@ -75,6 +78,7 @@ __all__ = [
     "CalendarBlock",
     "Absence",
     "Holiday",
+    "AiCall",
     "AuditLog",
     "ErrorLog",
     "Task",
@@ -121,4 +125,5 @@ __all__ = [
     "DownloadToken",
     "IndexStatus",
     "ViewChannel",
+    "VoiceNote",
 ]

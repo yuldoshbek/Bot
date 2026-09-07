@@ -1,5 +1,6 @@
 """Конфигурация приложения. Единственный источник настроек — переменные окружения."""
 from functools import lru_cache
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,15 +21,35 @@ class Settings(BaseSettings):
     # Организация
     org_name: str = "Организация"
     default_timezone: str = "Asia/Tashkent"
-    default_locale: str = "ru"
+    # Основной язык — узбекский латиницей. Русский остаётся, но дополнительным:
+    # человек переключает его сам в профиле.
+    default_locale: str = "uz"
 
     # Хранилища
     database_url: str = "postgresql+asyncpg://seta:seta@localhost:5432/seta"
     redis_url: str = "redis://localhost:6379/0"
 
-    # ИИ (блок 6)
+    # ИИ (блок 6). Выключен по умолчанию: система обязана работать целиком
+    # и без него, а включение — осознанное действие с ключом и бюджетом.
+    ai_enabled: bool = False
     openai_api_key: str = ""
+    # Потолки расхода. При превышении ИИ отключается, администратор получает
+    # уведомление, система продолжает работать полностью.
     ai_daily_budget_usd: float = 1.0
+    ai_monthly_budget_usd: float = 20.0
+    # Рутина — младшая модель, недельный отчёт — старшая, речь — whisper.
+    ai_model_routine: str = "gpt-4o-mini"
+    ai_model_report: str = "gpt-4o"
+    ai_model_voice: str = "whisper-1"
+    # Своя служба расшифровки. Задан адрес — речь слушает она, и это
+    # не стоит ничего: потолок расхода такую расшифровку не касается.
+    # Пусто — речь слушает платная модель, и только при AI_ENABLED=true.
+    stt_url: str = ""
+
+    # Mini App (блок 5, фаза 8). Пусто — приложения нет вовсе: кнопка
+    # не появляется, и браузеру ничего не разрешается. Выключение обязано
+    # выключать целиком, а не прятать кнопку при живом доступе.
+    miniapp_url: str = ""
 
     # Рабочие правила по умолчанию (настраиваются в админке на отдел/человека)
     work_start: str = "09:00"
@@ -47,6 +68,22 @@ class Settings(BaseSettings):
     @property
     def webhook_path(self) -> str:
         return "/telegram/webhook"
+
+    @property
+    def miniapp_origin(self) -> str:
+        """Источник приложения: схема и хост, без пути.
+
+        Браузер сверяет запрос с источником, а не с адресом страницы. Адрес
+        с путём в списке разрешённых не совпал бы ни с чем, и приложение молча
+        не получило бы ни одного ответа.
+        """
+        address = self.miniapp_url.strip()
+        if not address:
+            return ""
+        parts = urlsplit(address)
+        if not parts.scheme or not parts.netloc:
+            return ""
+        return f"{parts.scheme}://{parts.netloc}"
 
 
 @lru_cache

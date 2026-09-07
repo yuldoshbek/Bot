@@ -48,6 +48,8 @@ class Hit:
     kind: str
     id: int
     title: str
+    # Ключ словаря, а не готовая подпись: находку ищут один раз, а показывают
+    # человеку на его языке.
     subtitle: str = ""
     when: datetime | None = None
 
@@ -111,7 +113,7 @@ async def search(
         )
     ).scalars().all()
     results.meetings = [
-        Hit(kind="meeting", id=m.id, title=m.title, subtitle="встреча", when=m.start_at)
+        Hit(kind="meeting", id=m.id, title=m.title, subtitle="search.kind.meeting", when=m.start_at)
         for m in rows
     ]
 
@@ -128,7 +130,7 @@ async def search(
         )
     ).scalars().all()
     results.tasks = [
-        Hit(kind="task", id=t.id, title=t.title, subtitle="поручение", when=t.due_at)
+        Hit(kind="task", id=t.id, title=t.title, subtitle="search.kind.task", when=t.due_at)
         for t in rows
     ]
 
@@ -145,7 +147,7 @@ async def search(
         )
     ).scalars().all()
     results.decisions = [
-        Hit(kind="decision", id=d.id, title=d.title, subtitle="решение", when=d.created_at)
+        Hit(kind="decision", id=d.id, title=d.title, subtitle="search.kind.decision", when=d.created_at)
         for d in rows
     ]
 
@@ -169,7 +171,7 @@ async def search(
     results.documents = [
         Hit(
             kind="document", id=d.id, title=d.title or d.file_name,
-            subtitle="документ", when=d.created_at,
+            subtitle="search.kind.document", when=d.created_at,
         )
         for d in rows
     ]
@@ -193,7 +195,7 @@ async def search(
         )
     ).scalars().all()
     results.people = [
-        Hit(kind="person", id=p.id, title=p.full_name, subtitle="сотрудник") for p in rows
+        Hit(kind="person", id=p.id, title=p.full_name, subtitle="search.kind.person") for p in rows
     ]
 
     return results

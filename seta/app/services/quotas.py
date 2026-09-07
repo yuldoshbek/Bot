@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timeutil import to_local
+from app.core.i18n import t
 from app.models import (
     Meeting,
     MeetingParticipant,
@@ -26,7 +27,10 @@ from app.models import (
     User,
 )
 
+# Русские подписи остаются для журнала и выгрузок; на экран период выводится
+# через ключ словаря.
 PERIOD_LABELS = {QuotaPeriod.WEEK: "на неделю", QuotaPeriod.MONTH: "на месяц"}
+PERIOD_KEYS = {QuotaPeriod.WEEK: "quota.period.week", QuotaPeriod.MONTH: "quota.period.month"}
 
 
 @dataclass
@@ -49,15 +53,18 @@ class QuotaView:
     def unlimited(self) -> bool:
         return self.limit is None
 
-    def render(self) -> str:
+    def render(self, locale: str | None = None) -> str:
         if self.unlimited:
-            return "Лимит времени не задан."
+            return t("quota.unlimited", locale)
         left = max(0, self.left or 0)
-        over = "" if (self.left or 0) >= 0 else f" (перебор {-(self.left or 0)} мин)"
-        return (
-            f"Лимит {PERIOD_LABELS.get(self.period, '')}: {self.limit} мин · "
-            f"израсходовано {self.spent} · остаток {left}{over}"
+        over = (
+            "" if (self.left or 0) >= 0
+            else t("quota.over", locale, over=-(self.left or 0))
         )
+        period = t(PERIOD_KEYS.get(self.period, "quota.period.week"), locale)
+        line = t("quota.line", locale, period=period, limit=self.limit,
+                 spent=self.spent, left=left)
+        return f"{line}{over}"
 
 
 def period_bounds(period: str, now: datetime, tz_name: str) -> tuple[datetime, datetime]:

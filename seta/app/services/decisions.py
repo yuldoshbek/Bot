@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timeutil import utcnow
+from app.core.i18n import t
 from app.models import (
     AgendaItem,
     Decision,
@@ -35,6 +36,13 @@ from app.services.rbac import (
     scope_of,
     visible_department_ids,
 )
+
+# Русские подписи остаются для выгрузок; на экран статус выводится по ключу.
+STATUS_KEYS = {
+    DecisionStatus.OPEN: "decision.status.open",
+    DecisionStatus.DONE: "decision.status.done",
+    DecisionStatus.CANCELLED: "decision.status.cancelled",
+}
 
 STATUS_LABELS = {
     DecisionStatus.OPEN: "В работе",
@@ -87,15 +95,15 @@ async def add_agenda_item(
     """Добавляет пункт повестки в конец списка."""
     title = (title or "").strip()
     if len(title) < 3:
-        return Outcome(reason="Слишком коротко: пункт повестки — хотя бы три знака.")
+        return Outcome(reason=t("decision.err.agenda_short", actor.locale))
     if actor.organization_id != meeting.organization_id:
-        return Outcome(reason="Встреча другой организации.")
+        return Outcome(reason=t("decision.err.other_org_meeting", actor.locale))
     if meeting.status == MeetingStatus.CANCELLED:
-        return Outcome(reason="Встреча отменена.")
+        return Outcome(reason=t("decision.err.meeting_cancelled", actor.locale))
     if meeting.status == MeetingStatus.FINISHED:
-        return Outcome(reason="Встреча завершена, повестку уже не меняют.")
+        return Outcome(reason=t("decision.err.meeting_finished", actor.locale))
     if not await _may_touch_meeting(session, actor, meeting, "meeting.finish"):
-        return Outcome(reason="Повестку ведёт организатор встречи или его ассистент.")
+        return Outcome(reason=t("decision.err.agenda_rights", actor.locale))
 
     last = await session.scalar(
         select(func.max(AgendaItem.position)).where(AgendaItem.meeting_id == meeting.id)
@@ -132,9 +140,9 @@ async def mark_covered(
     """Отмечает пункт рассмотренным. Обратное движение тоже разрешено."""
     now = now or utcnow()
     if item.meeting_id != meeting.id:
-        return Outcome(reason="Этот пункт из другой встречи.")
+        return Outcome(reason=t("decision.err.other_meeting_item", actor.locale))
     if not await _may_touch_meeting(session, actor, meeting, "meeting.finish"):
-        return Outcome(reason="Отмечать пункты может организатор встречи или ассистент.")
+        return Outcome(reason=t("decision.err.cover_rights", actor.locale))
     item.covered = covered
     item.covered_at = now if covered else None
     await session.flush()
@@ -160,17 +168,17 @@ async def create(
     """
     title = (title or "").strip()
     if len(title) < 3:
-        return Outcome(reason="Нужна формулировка решения — хотя бы три знака.")
+        return Outcome(reason=t("decision.err.title_short", actor.locale))
     grants = await load_grants(session, actor)
     if not has_permission(grants, "decision.create"):
-        return Outcome(reason="Вносить решения может руководитель, ассистент или начальник отдела.")
+        return Outcome(reason=t("decision.err.create_rights", actor.locale))
     if meeting is not None:
         if meeting.organization_id != actor.organization_id:
-            return Outcome(reason="Встреча другой организации.")
+            return Outcome(reason=t("decision.err.other_org_meeting", actor.locale))
         if not await _may_touch_meeting(session, actor, meeting, "decision.create"):
-            return Outcome(reason="Эта встреча вам не открыта.")
+            return Outcome(reason=t("decision.err.meeting_closed_for_you", actor.locale))
     if responsible is not None and responsible.organization_id != actor.organization_id:
-        return Outcome(reason="Ответственный из другой организации.")
+        return Outcome(reason=t("decision.err.other_org_responsible", actor.locale))
 
     decision = Decision(
         organization_id=actor.organization_id,
@@ -210,17 +218,24 @@ async def close(
     """
     now = now or utcnow()
     if decision.organization_id != actor.organization_id:
-        return Outcome(reason="Решение другой организации.")
+        return Outcome(reason=t("decision.err.other_org", actor.locale))
     if decision.status != DecisionStatus.OPEN:
-        return Outcome(reason=f"Решение уже закрыто: {STATUS_LABELS[decision.status]}.")
+        return Outcome(reason=t("decision.err.already_closed", actor.locale,
+                         status=t(STATUS_KEYS[decision.status], actor.locale)))
 
     grants = await load_grants(session, actor)
     if not has_permission(grants, "decision.close"):
-        return Outcome(reason="Закрывать решения может руководитель или его ассистент.")
+        return Outcome(reason=t("decision.err.close_rights", actor.locale))
+    # Право закрывать не равно доступу к этому решению. Сегодня `decision.close`
+    # есть только у ролей с областью ORGANIZATION, которым открыто всё, и разницы
+    # не видно. Разница появится в тот день, когда право выдадут начальнику
+    # отдела: без этой строки он закрывал бы чужие решения по номеру.
+    if not await may_read(session, decision=decision, viewer=actor):
+        return Outcome(reason=t("decision.not_open", actor.locale))
 
     reason = (reason or "").strip()
     if not done and not reason:
-        return Outcome(reason="Нужна причина отмены — она останется в реестре.")
+        return Outcome(reason=t("decision.err.need_reason", actor.locale))
 
     decision.status = DecisionStatus.DONE if done else DecisionStatus.CANCELLED
     decision.closed_at = now
@@ -235,6 +250,60 @@ async def close(
         after={"status": decision.status}, reason=reason or None,
     )
     return Outcome(item=decision)
+
+
+async def may_read(session: AsyncSession, *, decision: Decision, viewer: User) -> bool:
+    """Открыто ли решение этому человеку. Единственная точка ответа на вопрос.
+
+    Отвечает ровно то же, что условие `visible_filter` в SQL. Пара нужна потому,
+    что список нельзя фильтровать после `LIMIT`, а одну запись нельзя открывать
+    выборкой: «загрузим пятьсот видимых и посмотрим, есть ли он там» врёт,
+    как только решений становится больше пятисот, — и врёт автору про его
+    собственное решение. Совпадение проверяется прогоном по матрице
+    «решение × человек» в `smoke_block4.py`.
+    """
+    if viewer.organization_id != decision.organization_id:
+        return False
+
+    grants = await load_grants(session, viewer)
+    scope = scope_of(grants, "decision.read")
+    if scope is None:
+        return False
+    if scope == Scope.ORGANIZATION:
+        return True
+
+    mine = viewer.id in (decision.author_id, decision.responsible_id)
+    if scope == Scope.DEPARTMENT:
+        # Порядок ветвей повторяет visible_filter буквально, включая случай
+        # «отделов не видно вообще»: там условие запроса заведомо ложно,
+        # значит и здесь ответ «нет» — даже на собственное решение.
+        visible = await visible_department_ids(session, viewer)
+        if not visible:
+            return False
+        if mine:
+            return True
+        people = set(
+            (
+                await session.execute(
+                    select(User.id).where(User.department_id.in_(visible))
+                )
+            ).scalars().all()
+        )
+        return decision.author_id in people or decision.responsible_id in people
+    return mine
+
+
+def overdue_filter(now: datetime) -> list:
+    """Условие «решение просрочено» — одним описанием, как и у поручений.
+
+    Открыто, срок задан, срок прошёл. Закрытое решение с прошедшим сроком
+    не просрочено, и решение без срока не просрочено никогда.
+    """
+    return [
+        Decision.status == DecisionStatus.OPEN,
+        Decision.due_date.is_not(None),
+        Decision.due_date < now,
+    ]
 
 
 def visible_filter(

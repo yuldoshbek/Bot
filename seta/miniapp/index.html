@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>SETA</title>
+    <!--
+      Скрипт Telegram обязан загрузиться до приложения: из него берётся
+      подписанная строка initData, без которой API не отвечает ничего.
+      Он же отдаёт цвета темы — приложение красится в тему собеседника,
+      а не в свою.
+    -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.i18n import t
 from app.core.text import esc
 from app.core.timeutil import to_local, utcnow
 from app.models import (
@@ -26,6 +27,7 @@ from app.models import (
     NotificationPriority,
     User,
 )
+from app.services import meetings as meeting_service
 from app.services.audit import write_audit
 from app.services.notifications import enqueue
 from app.services.rbac import can_access_object, has_permission, load_grants
@@ -33,7 +35,13 @@ from app.services.rbac import can_access_object, has_permission, load_grants
 # За сколько минут до начала появляется кнопка «Я на месте».
 CHECKIN_OPENS_MINUTES = 5
 
+# Русские подписи остаются для журнала; на экран оценка выводится по ключу.
 SCORE_LABELS = {1: "Полезная", 0: "Нейтральная", -1: "Бесполезная"}
+SCORE_KEYS = {
+    1: "meeting.score.useful",
+    0: "meeting.score.neutral",
+    -1: "meeting.score.useless",
+}
 
 
 # ── Явка ────────────────────────────────────────────────────────────────────
@@ -76,8 +84,10 @@ async def open_checkins(session: AsyncSession, now: datetime | None = None) -> i
                 # не нужно никому.
                 priority=NotificationPriority.CRITICAL,
                 body=(
-                    f"🕔 <b>Через {CHECKIN_OPENS_MINUTES} минут</b>\n\n"
-                    f"{esc(meeting.title)}\nНачало в {when}"
+                    t("meeting.checkin.soon", person.locale,
+                      minutes=CHECKIN_OPENS_MINUTES)
+                    + f"\n\n{esc(meeting.title)}\n"
+                    + t("meeting.checkin.starts_at", person.locale, time=when)
                 ),
                 payload={"meeting_id": meeting.id, "checkin": True},
                 timezone_name=person.timezone,
@@ -102,14 +112,25 @@ async def check_in(
     Отметка после начала принимается и записывается как опоздание: человек,
     вошедший на седьмой минуте, присутствовал, и притворяться, что его не
     было, незачем.
+
+    Отметиться может только участник встречи. Проверка здесь, а не в
+    обработчике: журнал явки имеет смысл, только если в него невозможно
+    попасть, не будучи приглашённым, — а номер встречи в нажатой кнопке
+    к участию не имеет отношения.
     """
     now = now or utcnow()
+    if user.organization_id != meeting.organization_id:
+        return False, t("meeting.checkin.other_org", user.locale)
+    if not await meeting_service.is_participant(
+        session, meeting_id=meeting.id, user_id=user.id
+    ):
+        return False, t("meeting.checkin.not_participant", user.locale)
     if meeting.status == MeetingStatus.CANCELLED:
-        return False, "Встреча отменена."
+        return False, t("meeting.checkin.cancelled", user.locale)
     if now < meeting.start_at - timedelta(minutes=CHECKIN_OPENS_MINUTES):
-        return False, "Отметиться можно за пять минут до начала."
+        return False, t("meeting.checkin.early", user.locale)
     if now > meeting.end_at:
-        return False, "Встреча закончилась — отметку теперь ставит ассистент."
+        return False, t("meeting.checkin.late", user.locale)
 
     late = max(0, int((now - meeting.start_at).total_seconds() // 60))
     savepoint = await session.begin_nested()
@@ -123,7 +144,7 @@ async def check_in(
     except IntegrityError:
         # Двойное нажатие: запись уже есть, и это не ошибка.
         await savepoint.rollback()
-        return False, "Вы уже отметились."
+        return False, t("meeting.checkin.already", user.locale)
     return True, None
 
 
@@ -144,15 +165,15 @@ async def correct(
     """
     now = now or utcnow()
     if actor.organization_id != meeting.organization_id:
-        return False, "Встреча другой организации."
+        return False, t("meeting.checkin.other_org", actor.locale)
 
     grants = await load_grants(session, actor)
     if not has_permission(grants, "meeting.attendance"):
-        return False, "Отмечать явку может руководитель или его ассистент."
+        return False, t("meeting.checkin.mark_rights", actor.locale)
     if not await can_access_object(
         session, actor, grants, "meeting.attendance", owner_id=meeting.owner_id
     ):
-        return False, "Эта встреча вам не открыта."
+        return False, t("meeting.checkin.not_open", actor.locale)
 
     record = (
         await session.execute(
@@ -228,21 +249,21 @@ async def rate(
     """
     now = now or utcnow()
     if score not in SCORE_LABELS:
-        return False, "Оценка бывает только «полезная», «нейтральная» или «бесполезная»."
+        return False, t("meeting.rate.bad_score", actor.locale)
     if actor.organization_id != meeting.organization_id:
-        return False, "Встреча другой организации."
+        return False, t("meeting.checkin.other_org", actor.locale)
     if meeting.status == MeetingStatus.CANCELLED:
-        return False, "Отменённую встречу не оценивают."
+        return False, t("meeting.rate.cancelled", actor.locale)
     if now < meeting.end_at:
-        return False, "Встреча ещё не закончилась."
+        return False, t("meeting.rate.not_over", actor.locale)
 
     grants = await load_grants(session, actor)
     if not has_permission(grants, "meeting.rate"):
-        return False, "Оценку ставит руководитель."
+        return False, t("meeting.rate.rights", actor.locale)
     if not await can_access_object(
         session, actor, grants, "meeting.rate", owner_id=meeting.owner_id
     ):
-        return False, "Эта встреча вам не открыта."
+        return False, t("meeting.checkin.not_open", actor.locale)
 
     record = (
         await session.execute(

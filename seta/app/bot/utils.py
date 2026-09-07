@@ -18,4 +18,3 @@ def callback_int(data: str | None, index: int = -1) -> int | None:
         return None
 
 
-STALE_BUTTON = "Кнопка устарела. Откройте раздел заново."

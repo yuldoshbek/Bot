@@ -1,7 +1,8 @@
 """Middleware авторизации.
 
 На каждый апдейт открывает транзакцию, находит сотрудника по Telegram ID
-и кладёт в контекст обработчика: session, user, grants, roles, organization.
+и кладёт в контекст обработчика: session, user, grants, roles, features,
+organization, locale.
 
 Middleware — первый рубеж, а не последний. Неподтверждённый человек проходит
 дальше намеренно: ему нужно закончить регистрацию, а на кнопки меню он получает
@@ -15,10 +16,13 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.core.db import session_scope
+from app.core.i18n import normalize as normalize_locale
+from app.core.i18n import t
 from app.core.timeutil import utcnow
 from app.models.enums import UserStatus
 from app.models.org import Organization
 from app.services.bootstrap import ensure_organization
+from app.services.features import load as load_features
 from app.services.rbac import load_grants, user_role_codes
 from app.services.registration import get_user_by_telegram_id
 
@@ -58,6 +62,18 @@ class AuthMiddleware(BaseMiddleware):
             data["user"] = user
             data["grants"] = await load_grants(session, user) if user else {}
             data["roles"] = await user_role_codes(session, user) if user else set()
+            # Переключатели разделов кладутся рядом с правами и одним запросом:
+            # обработчик обязан проверить их сам, как и право. Спрятать кнопку
+            # мало — старую кнопку жмут, а callback подставляют.
+            data["features"] = await load_features(session, organization.id)
+            # Язык кладётся рядом с правами по той же причине: он нужен каждому
+            # обработчику, а второй запрос за ним на каждую строку недопустим.
+            # У незнакомца записи ещё нет, и единственное, что о нём известно, —
+            # язык его Telegram. Это лучше, чем показать первый экран не на том
+            # языке ровно тем людям, которые систему ещё не видели.
+            data["locale"] = normalize_locale(
+                user.locale if user is not None else telegram_user.language_code
+            )
 
             if user is not None:
                 user.last_seen_at = utcnow()
@@ -65,7 +81,7 @@ class AuthMiddleware(BaseMiddleware):
                     user.telegram_username = telegram_user.username
 
             if not self._is_allowed(event, user):
-                await self._reject(event, user)
+                await self._reject(event, user, data["locale"])
                 return None
 
             return await handler(event, data)
@@ -94,15 +110,16 @@ class AuthMiddleware(BaseMiddleware):
         return False
 
     @staticmethod
-    async def _reject(event: TelegramObject, user) -> None:
+    async def _reject(event: TelegramObject, user, locale: str) -> None:
         if user is None:
-            text = "Чтобы пользоваться системой, нажмите /start и пройдите регистрацию."
+            key = "start.need_registration"
         elif user.status == UserStatus.PENDING:
-            text = "Ваша заявка на рассмотрении у администратора. Мы сообщим, как только её подтвердят."
+            key = "start.pending"
         elif user.status == UserStatus.SUSPENDED:
-            text = "Доступ приостановлен. Обратитесь к администратору."
+            key = "start.suspended"
         else:
-            text = "Доступ к системе не открыт. Обратитесь к администратору."
+            key = "start.no_access"
+        text = t(key, locale)
 
         if isinstance(event, Message):
             await event.answer(text)

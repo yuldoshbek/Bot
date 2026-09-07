@@ -14,10 +14,14 @@ from app.bot.handlers import (
     documents,
     meetings,
     menu,
+    protocol,
     registry,
     start,
     tasks,
+    voice,
 )
+from app.ai import gate
+from app.bot import webapp
 from app.bot.loader import bot, dp
 from app.bot.middlewares.auth import AuthMiddleware
 from app.core.config import settings
@@ -75,10 +79,18 @@ def setup() -> None:
     dp.include_router(availability.router)
     dp.include_router(admin.router)
     dp.include_router(tasks.router)
+    # Голосовое поручение идёт до общего меню: F.voice ловится только здесь,
+    # и порядок важен ровно настолько, насколько важен он у любого фильтра.
+    dp.include_router(voice.router)
     dp.include_router(meetings.router)
+    # Протокол ловит mt:proto: — до общего обработчика карточки встречи.
+    dp.include_router(protocol.router)
     dp.include_router(registry.router)
     dp.include_router(documents.router)
     dp.include_router(menu.router)
+
+    # Кто слушает речь и кто пишет текст — решается один раз, при запуске.
+    gate.configure()
 
     dp.errors.register(on_error)
 
@@ -103,6 +115,10 @@ async def main() -> None:
 
     me = await bot.get_me()
     log.info("Бот запущен: @%s", me.username)
+
+    # Кнопка приложения ставится при запуске — и снимается им же, если адрес
+    # убрали: иначе она осталась бы в чатах, открывая то, чего больше нет.
+    await webapp.set_default(bot)
 
     if settings.bot_mode == "webhook":
         # Апдейты принимает API. Процесс не завершается: иначе restart-политика

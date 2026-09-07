@@ -366,7 +366,7 @@ async def main() -> None:
         ]
         for item in sample:
             item.id = 1000 + sample.index(item)
-        grouped = group_messages(sample)
+        grouped = group_messages(sample, "ru")
         check(len(grouped) == 1, "четыре обычных уведомления объединяются в одно")
         check("Обновления по вашим поручениям: 4" in grouped[0][1], "в сводке указано их количество")
 
@@ -375,7 +375,7 @@ async def main() -> None:
             priority=NotificationPriority.CRITICAL, body="Критично",
             status=NotificationStatus.PENDING, scheduled_at=utcnow(), created_at=utcnow(),
         )
-        grouped = group_messages(sample + [critical])
+        grouped = group_messages(sample + [critical], "ru")
         check(len(grouped) == 2, "критичное уведомление идёт отдельным сообщением")
 
         sent_to: list[tuple[int, str]] = []
