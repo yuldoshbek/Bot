@@ -593,6 +593,8 @@ async def with_database() -> None:
         # и русские строки в нём — часть промпта. Человеку эти модули
         # отвечают ключами словаря, и переводит их обработчик.
         "app/ai/voice.py",
+        "app/ai/question.py",
+        "app/services/questions.py",
         "app/bot/keyboards/common.py",
         "app/bot/middlewares/auth.py",
         "app/services/dashboard.py",
@@ -815,6 +817,30 @@ async def with_database() -> None:
         left = await session.scalar(
             select(Organization.id).where(Organization.name == ORG)
         )
+    print("\n23. У каждого значения из перечней вопроса есть слово")
+    # Строка «понял так» собирает ключи на ходу: `ask.period.{период}`.
+    # Разбор дерева такие ключи пропускает — проверить их статически нечем, —
+    # поэтому они обходятся здесь, прямо по перечням. Забытое слово показало бы
+    # человеку имя ключа: «Понял так: поручения · ask.period.past_month».
+    from app.services import questions
+
+    computed = (
+        [f"ask.kind.{kind}" for kind in questions.KINDS]
+        + [f"ask.period.{period}" for period in questions.PERIODS]
+        + [questions.DATE_FIELD[kind] for kind in questions.KINDS]
+        + [f"task.status.{value.lower()}" for value in questions.STATUSES["task"].values()]
+        + [f"decision.status.{value.lower()}"
+           for value in questions.STATUSES["decision"].values()]
+        + [f"meeting.status.{value.lower()}"
+           for value in questions.STATUSES["meeting"].values()]
+        + [f"priority.{value.lower()}" for value in questions.PRIORITIES.values()]
+    )
+    check(len(computed) > 25, f"перечней набралось: {len(computed)} значений")
+    for locale in LOCALES:
+        # Ключ, которого нет, `t` возвращает сам собой — по этому и видно.
+        missing = sorted(key for key in computed if t(key, locale) == key)
+        check(not missing, f"{locale}: слово есть у каждого значения", str(missing[:5]))
+
     check(left is None, "тестовая организация убрана")
 
 

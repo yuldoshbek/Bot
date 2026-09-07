@@ -30,7 +30,6 @@ from app.core.text import cut, esc
 from app.core.timeutil import fmt_dt, to_local, utcnow
 from app.models import (
     Decision,
-    DecisionStatus,
     Meeting,
     MeetingParticipant,
     MeetingRequest,
@@ -42,9 +41,11 @@ from app.models import (
 )
 from app.models.org import Department
 from app.services import analytics, quotas
+from app.services import decisions as decision_service
 from app.services import features as feature_service
 from app.services import slots as slot_service
 from app.services.analytics import Metric
+from app.services.tasks import overdue_filter
 from app.services.rbac import Grant, has_permission
 
 # Сколько ближайших встреч показывать в блоке «дальше».
@@ -54,14 +55,6 @@ TOP_DEPARTMENTS = 5
 # Сколько поручений личного контроля показывать поимённо.
 PERSONAL_LIMIT = 5
 
-# Поручение ещё ждут — те же статусы, что у контроля сроков.
-PENDING_STATUSES = (
-    TaskStatus.NEW,
-    TaskStatus.ACKNOWLEDGED,
-    TaskStatus.IN_PROGRESS,
-    TaskStatus.BLOCKED,
-    TaskStatus.OVERDUE,
-)
 
 
 @dataclass(slots=True)
@@ -181,9 +174,7 @@ async def build(
             await session.scalar(
                 select(func.count(Decision.id)).where(
                     Decision.organization_id == viewer.organization_id,
-                    Decision.status == DecisionStatus.OPEN,
-                    Decision.due_date.is_not(None),
-                    Decision.due_date < now,
+                    *decision_service.overdue_filter(now),
                 )
             )
             or 0
@@ -192,9 +183,7 @@ async def build(
     # ── Что просрочено ──────────────────────────────────────────────────────
     overdue = (
         Task.organization_id == viewer.organization_id,
-        Task.status.in_(PENDING_STATUSES),
-        Task.due_at.is_not(None),
-        Task.due_at < now,
+        *overdue_filter(now),
     )
     board.overdue_total = int(await session.scalar(select(func.count(Task.id)).where(*overdue)) or 0)
 

@@ -128,8 +128,9 @@ DOCX, XLSX и TXT, и файл начинает находиться поиск�
 ## Команды разработки
 
 ```bash
-# проверки: smoke_block1 (35), smoke_block2 (52), smoke_block3 (156),
-# smoke_block4 (160), smoke_hardening (51), stress_test (62) — всего 516
+# проверки: smoke_block1 (35), smoke_block2 (52), smoke_block3 (168),
+# smoke_block4 (179), smoke_block5 (139), smoke_hardening (51), smoke_api (31),
+# smoke_i18n (174), smoke_ai (437), stress_test (81) — всего 1347
 docker compose -f docker-compose.yml -f docker-compose.dev.yml \
   run --rm --no-deps migrate python scripts/smoke_block1.py
 

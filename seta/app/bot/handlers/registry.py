@@ -10,6 +10,7 @@
 from datetime import timedelta
 
 from aiogram import Bot, F, Router
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -29,8 +30,11 @@ from app.core.timeutil import fmt_dt, to_local, utcnow
 from app.models import Decision, DecisionStatus, Meeting, User
 from app.services import decisions as service
 from app.services import export as export_service
+from app.services import questions as question_service
 from app.services import search as search_service
 from app.services.rbac import Grant, has_permission
+from app.ai import question as question_ai
+from app.core.config import settings
 
 router = Router(name="registry")
 
@@ -51,8 +55,43 @@ class Finding(StatesGroup):
     query = State()
 
 
+class Asking(StatesGroup):
+    question = State()
+
+
 class NewDecision(StatesGroup):
     title = State()
+
+
+def _line(hit: search_service.Hit, timezone_name: str) -> str:
+    """Как выглядит найденная запись. Одно описание на поиск и на вопрос:
+    две строчки, набранные порознь, разъезжаются на первой же правке."""
+    when = f" · {to_local(hit.when, timezone_name):%d.%m}" if hit.when else ""
+    return f"{KIND_ICONS[hit.kind]} {esc(cut(hit.title, 70))}{when}"
+
+
+def _button(hit: search_service.Hit) -> list[InlineKeyboardButton] | None:
+    """Кнопка к найденной записи. У сотрудника карточки нет — и кнопки тоже."""
+    prefix = KIND_CALLBACK.get(hit.kind)
+    if not prefix:
+        return None
+    return [InlineKeyboardButton(
+        text=f"{KIND_ICONS[hit.kind]} {cut(hit.title, 30)}",
+        callback_data=f"{prefix}:{hit.id}",
+    )]
+
+
+def _ask_kb(locale: str) -> InlineKeyboardMarkup | None:
+    """Кнопка «спросить словами» — только когда есть кому разбирать вопрос.
+
+    При выключенном ИИ кнопки нет, а команда остаётся и уходит в обычный
+    поиск: пропавшая кнопка честнее кнопки, которая делает не то, что обещает.
+    """
+    if not settings.ai_enabled:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t("ask.button", locale), callback_data="ask:start")
+    ]])
 
 
 # ── Поиск ───────────────────────────────────────────────────────────────────
@@ -60,7 +99,8 @@ class NewDecision(StatesGroup):
 async def search_start(message: Message, state: FSMContext, locale: str) -> None:
     await state.clear()
     await message.answer(
-        f"{t('search.title', locale)}\n\n{t('search.hint', locale)}"
+        f"{t('search.title', locale)}\n\n{t('search.hint', locale)}",
+        reply_markup=_ask_kb(locale),
     )
     await state.set_state(Finding.query)
 
@@ -90,15 +130,93 @@ async def search_run(
             continue
         lines.append(f"<b>{t(title_key, locale)}</b>")
         for hit in hits:
-            when = f" · {to_local(hit.when, user.timezone):%d.%m}" if hit.when else ""
-            lines.append(f"{KIND_ICONS[hit.kind]} {esc(cut(hit.title, 70))}{when}")
-            prefix = KIND_CALLBACK.get(hit.kind)
-            if prefix:
-                rows.append([InlineKeyboardButton(
-                    text=f"{KIND_ICONS[hit.kind]} {cut(hit.title, 30)}",
-                    callback_data=f"{prefix}:{hit.id}",
-                )])
+            lines.append(_line(hit, user.timezone))
+            button = _button(hit)
+            if button:
+                rows.append(button)
         lines.append("")
+
+    await message.answer(
+        "\n".join(lines).strip(),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows[:8]) if rows else None,
+    )
+
+
+# ── Вопрос своими словами ───────────────────────────────────────────────────
+@router.callback_query(F.data == "ask:start")
+async def ask_start(call: CallbackQuery, state: FSMContext, locale: str) -> None:
+    await state.clear()
+    await call.message.answer(f"{t('ask.title', locale)}\n\n{t('ask.hint', locale)}")
+    await state.set_state(Asking.question)
+    await call.answer()
+
+
+@router.message(Command("ask"))
+async def ask_command(
+    message: Message, command: CommandObject, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant], locale: str,
+) -> None:
+    """Вопрос одной строкой. Без текста — спрашиваем, о чём именно.
+
+    Команда работает и при выключенном ИИ: разобрать вопрос будет некому,
+    и он уйдёт в обычный поиск по словам. Это и есть «выключенный ИИ ничего
+    не ломает»: функция отвечает хуже, но отвечает.
+    """
+    asked = (command.args or "").strip()
+    if not asked:
+        await message.answer(f"{t('ask.title', locale)}\n\n{t('ask.hint', locale)}")
+        await state.set_state(Asking.question)
+        return
+    await state.clear()
+    await _answer(message, session, user=user, grants=grants, locale=locale, asked=asked)
+
+
+@router.message(Asking.question, F.text)
+async def ask_run(
+    message: Message, state: FSMContext, session: AsyncSession,
+    user: User, grants: dict[str, Grant], locale: str,
+) -> None:
+    await state.clear()
+    await _answer(
+        message, session, user=user, grants=grants, locale=locale, asked=message.text or ""
+    )
+
+
+async def _answer(
+    message: Message, session: AsyncSession, *, user: User,
+    grants: dict[str, Grant], locale: str, asked: str,
+) -> None:
+    """Показывает ответ на вопрос — вместе с тем, как вопрос понят.
+
+    Строка «понял так» стоит первой и всегда. Молча неправильно понятый
+    вопрос выглядит как правдивый ответ, и это худшее, что сценарий может
+    сделать: человек уйдёт спокойным, не увидев того, о чём спрашивал.
+    """
+    answer = await question_ai.answer(session, asked, viewer=user, grants=grants)
+
+    lines: list[str] = [t("ask.title", locale), ""]
+    if answer.searched:
+        # Разобрать не вышло. Человек должен видеть, что это поиск по буквам,
+        # а не понятый вопрос: иначе пустота читается как «ничего нет».
+        lines.append(t("ask.by_words", locale))
+    elif answer.filter is not None:
+        lines.append(question_service.describe(answer.filter, locale))
+        lines.extend(t(note, locale) for note in answer.filter.notes)
+    lines.append("")
+
+    if answer.empty:
+        lines.append(t("ask.empty", locale))
+        await message.answer("\n".join(lines).strip())
+        return
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for hit in answer.hits:
+        lines.append(_line(hit, user.timezone))
+        button = _button(hit)
+        if button:
+            rows.append(button)
+    if answer.more:
+        lines += ["", t("ask.more", locale, count=question_service.MAX_ROWS)]
 
     await message.answer(
         "\n".join(lines).strip(),

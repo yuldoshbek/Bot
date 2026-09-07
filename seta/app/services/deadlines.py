@@ -49,18 +49,9 @@ from app.models.rbac import Role, UserRole
 from app.models.task import Task
 from app.models.user import User
 from app.services.notifications import enqueue
-from app.services.tasks import add_event, mark_overdue
+from app.services.tasks import PENDING_STATUSES, add_event, mark_overdue
 
 log = logging.getLogger("seta.deadlines")
-
-# Статусы, в которых поручение ещё ждёт исполнителя.
-PENDING_STATUSES = (
-    TaskStatus.NEW,
-    TaskStatus.ACKNOWLEDGED,
-    TaskStatus.IN_PROGRESS,
-    TaskStatus.BLOCKED,
-    TaskStatus.OVERDUE,
-)
 
 # Ступени эскалации, хранятся в tasks.escalation_level.
 LEVEL_NONE = 0

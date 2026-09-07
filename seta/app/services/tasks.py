@@ -54,6 +54,16 @@ ACTIVE_STATUSES = (
     TaskStatus.OVERDUE,
 )
 
+# Статусы, в которых поручение ещё ждут. Отличаются от живых на «На проверке»:
+# сданное на проверку поручение исполнитель уже отдал, и торопить его нечем.
+PENDING_STATUSES = (
+    TaskStatus.NEW,
+    TaskStatus.ACKNOWLEDGED,
+    TaskStatus.IN_PROGRESS,
+    TaskStatus.BLOCKED,
+    TaskStatus.OVERDUE,
+)
+
 # Значок — не язык, поэтому он остаётся в коде, а не уезжает в словарь:
 # цвет статуса одинаков на всех языках, и от качества перевода не зависит.
 STATUS_MARKS: dict[TaskStatus, str] = {
@@ -939,3 +949,22 @@ def visible_filter(user: User, grants: dict[str, Grant], visible_departments: se
             return [same_org, mine]
         return [same_org, or_(mine, Task.department_id.in_(visible_departments))]
     return [same_org, mine]
+
+
+def overdue_filter(now: datetime) -> list:
+    """Условие «поручение просрочено» — одним описанием на всю систему.
+
+    Просрочка складывается из трёх условий, и все три обязательны: срок задан,
+    срок прошёл, поручения всё ещё ждут. Выполненное вчера с сегодняшним сроком
+    не просрочено, а поручение без срока не просрочено никогда.
+
+    Живёт здесь, потому что спрашивают об этом из трёх мест: утренняя сводка,
+    контроль сроков и вопрос своими словами. Три описания одного правила
+    разошлись бы молча, и первым признаком стало бы расхождение чисел
+    в сводке и в ответе на вопрос — то есть недоверие ко всей системе.
+    """
+    return [
+        Task.status.in_(PENDING_STATUSES),
+        Task.due_at.is_not(None),
+        Task.due_at < now,
+    ]

@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import delete, func, select
 
-from app.ai import gate, models, protocol, report as report_words, summary, voice
+from app.ai import gate, models, protocol, question as ask_ai
+from app.ai import report as report_words, summary, voice
 from app.ai.local import Local, Mixed
 from app.ai.provider import Fake, ProviderError
 from app.core.config import settings
@@ -53,13 +54,15 @@ from app.models import (
     TaskComment,
     TaskEvent,
     TaskExtension,
+    TaskStatus,
     User,
     UserRole,
     UserStatus,
     VoiceNote,
     WorkingHours,
 )
-from app.services import decisions, digest, weekly
+from app.services import decisions, digest, questions, weekly
+from app.services import meetings as meeting_service
 from app.services import tasks as task_service
 from app.services.bootstrap import bootstrap, ensure_default_working_hours, grant_role
 from app.services.rbac import load_grants
@@ -154,6 +157,9 @@ class Cast:
     worker: int      # сотрудник — область «только свои»
     outsider: int    # сотрудник другого отдела
     twins: int       # два однофамильца: имя, по которому нельзя выбрать
+    head: int = 0    # начальник отдела — область «свой отдел»
+    finance: int = 0     # отдел, к которому приписаны свои
+    projects: int = 0    # чужой отдел: спросивший про него получает пустоту
 
 
 async def seed() -> Cast:
@@ -187,7 +193,13 @@ async def seed() -> Cast:
         # а не взять первого попавшегося.
         await person("ТЕСТ Salimov Bir", RoleCode.EMPLOYEE, finance, 993_004)
         await person("ТЕСТ Salimov Ikki", RoleCode.EMPLOYEE, finance, 993_005)
-        return Cast(org.id, chief.id, worker.id, outsider.id, 2)
+        # Начальник отдела — единственная область «свой отдел». Без него матрица
+        # проверяла бы только «всё» и «своё», а промахивается обычно середина.
+        head = await person("ТЕСТ Nazarov Boshliq", RoleCode.DEPT_HEAD, finance, 993_006)
+        return Cast(
+            org.id, chief.id, worker.id, outsider.id, 2,
+            head=head.id, finance=finance.id, projects=projects.id,
+        )
 
 
 async def main() -> None:
@@ -211,6 +223,7 @@ async def main() -> None:
         await stage_speech(cast)
         await stage_weekly(cast)
         stage_models()
+        await stage_ask(cast)
     finally:
         settings.ai_enabled = was_enabled
         gate.use(Fake())
@@ -1859,8 +1872,7 @@ def stage_models() -> None:
     check(not unknown, "и каждый есть в справочнике", str(unknown))
     # Обратное тоже важно: объявленный, но никем не используемый вид — это
     # либо забытый сценарий, либо опечатка в имени.
-    # «ask» объявлен заранее — под вопрос своими словами, фазу 6.
-    idle = sorted(set(models.KINDS) - used - {"ask"})
+    idle = sorted(set(models.KINDS) - used)
     check(not idle, "и каждый объявленный используется", str(idle))
 
     print("\n15.3. Роль решает, какой моделью")
@@ -1915,6 +1927,625 @@ def stage_models() -> None:
     # Базовые модели узбекскими не считаются: иначе выбор «uz» вернул бы
     # ту, что узбекского почти не знает.
     check("small" not in uzbek, "базовая small в узбекские не попала")
+
+
+# ── Вопрос своими словами ───────────────────────────────────────────────────
+# Момент, в который задают вопрос. Пришпилен, как и остальные точки отсчёта:
+# «за месяц», посчитанный от часов машины, проходит месяц и падает.
+ASKED = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
+
+
+async def _asked(cast: Cast, who: int, reply: str, *, text: str = "ТЕСТ savol"):
+    """Задаёт вопрос с заранее известным ответом модели."""
+    gate.use(Fake(answers=[reply]))
+    async with session_scope() as session:
+        viewer = await session.get(User, who)
+        grants = await load_grants(session, viewer)
+        return await ask_ai.answer(
+            session, text, viewer=viewer, grants=grants, now=ASKED
+        )
+
+
+async def _resolved(cast: Cast, raw: dict, who: int = 0) -> questions.Filter:
+    """Разбирает присланные моделью значения от имени человека."""
+    async with session_scope() as session:
+        viewer = await session.get(User, who or cast.chief)
+        grants = await load_grants(session, viewer)
+        return await questions.resolve(session, raw, viewer=viewer, grants=grants)
+
+
+async def _all_counts(org_id: int) -> tuple[int, int, int]:
+    """Сколько записей в организации. Считается запросом: пропади таблица,
+    счёт не выполнится вовсе, и это тоже ответ."""
+    async with session_scope() as session:
+        tasks = await session.scalar(
+            select(func.count(Task.id)).where(Task.organization_id == org_id)
+        )
+        made = await session.scalar(
+            select(func.count(Decision.id)).where(Decision.organization_id == org_id)
+        )
+        meets = await session.scalar(
+            select(func.count(Meeting.id)).where(Meeting.organization_id == org_id)
+        )
+    return int(tasks or 0), int(made or 0), int(meets or 0)
+
+
+async def stage_ask(cast: Cast) -> None:
+    print("\n16. Вопрос своими словами")
+    settings.ai_enabled = True
+    # Журнал очищается: дальше по нему проверяется ровно одна строка вопроса.
+    async with session_scope() as session:
+        await session.execute(delete(AiCall).where(AiCall.organization_id == cast.org))
+
+    _ask_payload()
+    await _ask_values(cast)
+    _ask_window()
+    await _ask_names(cast)
+    await _ask_records(cast)
+    await _ask_matrix(cast)
+    await _ask_foreign(cast)
+    await _ask_no_writes(cast)
+    await _ask_limit(cast)
+    await _ask_fallback(cast)
+    await _ask_overdue(cast)
+    _ask_one_rule()
+    await _ask_journal(cast)
+
+
+def _ask_payload() -> None:
+    print("\n16.1. От модели принимаются только перечисленные поля")
+    check(ask_ai.payload("") == {}, "пустой ответ — пустая структура")
+    check(ask_ai.payload("здравствуйте") == {}, "текст без JSON — пустая структура")
+    check(ask_ai.payload("[1, 2]") == {}, "список вместо структуры отброшен")
+    check(ask_ai.payload('{"kind":') == {}, "испорченный JSON отброшен")
+
+    fenced = ask_ai.payload('```json\n{"kind":"decision"}\n```')
+    check(fenced == {"kind": "decision"}, "JSON в тройных кавычках разобран", str(fenced))
+    prose = ask_ai.payload('Вот условия: {"kind":"meeting"} — готово')
+    check(prose == {"kind": "meeting"}, "JSON внутри пояснения разобран", str(prose))
+
+    # Третья граница блока: модель возвращает структуру, а не запрос. Поле,
+    # которого нет в перечне, не проверяется на опасность — оно не берётся.
+    written = ask_ai.payload(
+        '{"kind":"task","sql":"SELECT * FROM tasks","query":"drop","table":"users"}'
+    )
+    check(written == {"kind": "task"}, "текст запроса от модели не принят", str(written))
+    wide = ask_ai.payload('{"kind":"task","limit":1000,"organization_id":7,"user_id":3}')
+    check(set(wide) == {"kind"}, "предел и чужие ключи отброшены", str(sorted(wide)))
+    nested = ask_ai.payload('{"kind":"task","person":{"id":3},"department":["moliya"]}')
+    check(set(nested) == {"kind"}, "вложенные значения отброшены", str(sorted(nested)))
+
+    long_name = ask_ai.payload('{"department":"' + "я" * 900 + '"}')
+    check(len(long_name.get("department", "")) == ask_ai.MAX_VALUE,
+          "длинное значение укорочено", str(len(long_name.get("department", ""))))
+
+    # «Да/нет» разбирается отдельно от строк. `bool("false")` — истина,
+    # и вопрос «что просрочено» получил бы ответ наоборот.
+    check(ask_ai.payload('{"overdue":true}').get("overdue") is True, "просрочку просят")
+    check(ask_ai.payload('{"overdue":false}').get("overdue") is False, "просрочку не просят")
+    check(ask_ai.payload('{"overdue":"false"}').get("overdue") is False,
+          "строка «false» прочитана как «нет», а не как «да»",
+          str(ask_ai.payload('{"overdue":"false"}')))
+    check("overdue" not in ask_ai.payload('{"overdue":"balki"}'),
+          "невнятное «да/нет» отброшено")
+    check("status" not in ask_ai.payload('{"status":true}'),
+          "булево в строковом поле отброшено")
+
+
+async def _ask_values(cast: Cast) -> None:
+    print("\n16.2. Значения сверяются с перечнями, а не берутся на слово")
+    check((await _resolved(cast, {"kind": "выдуманный"})).kind == "task",
+          "незнакомый вид записей — поручения")
+    check((await _resolved(cast, {"kind": "decision"})).kind == "decision",
+          "знакомый вид принят")
+
+    check((await _resolved(cast, {"kind": "task", "status": "in_progress"})).status
+          == "IN_PROGRESS", "статус своего вида принят")
+    check((await _resolved(cast, {"kind": "task", "status": "open"})).status == "",
+          "статус чужого вида отброшен")
+    # Проверка не «всегда отбрасываем»: у решения тот же «open» осмыслен.
+    check((await _resolved(cast, {"kind": "decision", "status": "open"})).status
+          == "OPEN", "и у своего вида тот же статус принят")
+
+    check((await _resolved(cast, {"kind": "task", "priority": "high"})).priority
+          == "HIGH", "приоритет принят")
+    check((await _resolved(cast, {"kind": "task", "priority": "срочно"})).priority == "",
+          "незнакомый приоритет отброшен")
+    check((await _resolved(cast, {"kind": "decision", "priority": "high"})).priority == "",
+          "у решения приоритета нет вовсе")
+
+    check((await _resolved(cast, {"kind": "task", "overdue": True})).overdue is True,
+          "у поручения просрочка бывает")
+    check((await _resolved(cast, {"kind": "meeting", "overdue": True})).overdue is False,
+          "у встречи не бывает")
+    # Разбор значений — отдельная дверь, и запирается она сама. `bool("false")`
+    # истинно, и «не просрочено» превратилось бы в «просрочено» ещё до запроса.
+    check((await _resolved(cast, {"kind": "task", "overdue": "false"})).overdue is False,
+          "строка вместо «да/нет» не становится «да» и при разборе")
+
+    check((await _resolved(cast, {"period": "вчера"})).period == "",
+          "незнакомый период отброшен")
+    check((await _resolved(cast, {"period": "past_month"})).period == "past_month",
+          "знакомый принят")
+
+    bare = await _resolved(cast, {"kind": "task"})
+    check(not bare.narrow, "фильтр без единого условия узким не считается")
+    check((await _resolved(cast, {"kind": "task", "overdue": True})).narrow,
+          "а с условием — считается")
+
+
+def _ask_window() -> None:
+    print("\n16.3. Границы периода считает система, а не модель")
+    tashkent = "Asia/Tashkent"
+    # Ташкент — UTC+5 круглый год, перевода часов нет. Местный день 7 сентября
+    # начинается в 19:00 UTC шестого. Посчитано руками: сверять границы той же
+    # функцией, что их строит, — значит не проверять ничего.
+    day = datetime(2026, 9, 6, 19, 0, tzinfo=timezone.utc)
+
+    since, until = questions.window("past_month", now=ASKED, timezone_name=tashkent)
+    check(since == day - timedelta(days=30),
+          "прошедший месяц начинается за тридцать дней до местного дня", str(since))
+    check(until == day + timedelta(days=1),
+          "и кончается началом завтрашнего местного дня", str(until))
+
+    since, until = questions.window("week", now=ASKED, timezone_name=tashkent)
+    check(since == day, "ближайшая неделя начинается сегодня", str(since))
+    check(until == day + timedelta(days=7), "и кончается через семь дней", str(until))
+
+    today = questions.window("today", now=ASKED, timezone_name=tashkent)
+    check(today == (day, day + timedelta(days=1)), "сегодня — ровно местные сутки",
+          str(today))
+    check(questions.window("выдуманный", now=ASKED, timezone_name=tashkent) == (None, None),
+          "незнакомый период границ не даёт")
+
+    # Направление внутри названия — не украшение: «за месяц» смотрит назад,
+    # «на месяц» вперёд, и вопрос о просрочке различает их до дня.
+    back = questions.window("past_month", now=ASKED, timezone_name=tashkent)
+    forward = questions.window("month", now=ASKED, timezone_name=tashkent)
+    check(back[0] < ASKED < back[1], "прошедший месяц включает сегодняшний день")
+    check(back[0] < forward[0], "ближайший начинается позже прошедшего")
+    check(forward[1] > back[1], "и кончается позже")
+
+    # Пояс получателя, а не сервера: в Лиссабоне тот же день начинается иначе.
+    other = questions.window("today", now=ASKED, timezone_name="Europe/Lisbon")
+    check(other[0] != today[0], "у другого часового пояса другая граница дня",
+          f"{other[0]} = {today[0]}")
+
+
+async def _ask_names(cast: Cast) -> None:
+    print("\n16.4. Имя и отдел превращает система")
+    named = await _resolved(cast, {"kind": "task", "person": "Karimov"})
+    check(named.person_ids == [cast.worker], "названный человек найден",
+          str(named.person_ids))
+    check(named.possible, "и вопрос остался выполнимым")
+
+    ghost = await _resolved(cast, {"kind": "task", "person": "Xayoliy Odam"})
+    check(not ghost.possible,
+          "ненайденный человек делает ответ пустым, а не снимает условие")
+    check("ask.note.no_person" in ghost.notes, "и причина названа", str(ghost.notes))
+
+    twins = await _resolved(cast, {"kind": "task", "person": "Salimov"})
+    check(len(twins.person_ids) == cast.twins, "однофамильцы взяты все",
+          str(twins.person_ids))
+    check("ask.note.many_people" in twins.notes, "и об этом сказано вслух")
+
+    found = await _resolved(cast, {"kind": "task", "department": "Moliya"})
+    check(found.department_id == cast.finance, "отдел найден по части названия",
+          str(found.department_id))
+
+    missing = await _resolved(cast, {"kind": "task", "department": "Yoʻq boʻlim"})
+    check(not missing.possible, "ненайденный отдел тоже делает ответ пустым")
+    check(not missing.notes,
+          "и молча: «отдела нет» и «отдел не ваш» обязаны выглядеть одинаково")
+
+    # Шаблонный знак в названии — это знак, а не образец поиска.
+    wild = await _resolved(cast, {"kind": "task", "department": "%"})
+    check(not wild.possible, "название из одного «%» не выбирает первый попавшийся")
+
+    # Названия отделов и имена пишут люди, а строка «понял так» уходит
+    # в сообщение с разметкой. Угловая скобка в названии сломала бы отправку
+    # целиком — человек не получил бы ответа вовсе, и не понял бы почему.
+    marked = questions.describe(
+        questions.Filter(
+            kind="task", department_name="<b>Moliya</b>", person_names=["A & B"],
+        ),
+        "ru",
+    )
+    check("<b>" not in marked, "разметка из названия отдела в строку не попадает",
+          marked)
+    check("&amp;" in marked, "и амперсанд в имени экранирован", marked)
+
+    # Отдел чужой организации не находится вовсе: граница организации стоит
+    # до всех остальных, иначе «по организации» означало бы «по всем сразу».
+    async with session_scope() as session:
+        alien_org = Organization(name=ORG_NAME, timezone="Asia/Tashkent")
+        session.add(alien_org)
+        await session.flush()
+        session.add(Department(organization_id=alien_org.id, name="ТЕСТ Chetdagi"))
+    alien = await _resolved(cast, {"kind": "task", "department": "Chetdagi"})
+    check(not alien.possible, "отдел чужой организации не находится")
+
+
+async def _ask_records(cast: Cast) -> None:
+    """Записи для матрицы: по одной на каждое отношение, которое проверяется.
+
+    Статусы взяты редкие намеренно: по ним матрица отделена от всего, что
+    насоздавали предыдущие проверки, и остаётся короче предела показа.
+    """
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        worker = await session.get(User, cast.worker)
+        outsider = await session.get(User, cast.outsider)
+        head = await session.get(User, cast.head)
+
+        for creator, assignee, title in (
+            (chief, worker, "ТЕСТ Bloklangan moliya"),
+            (chief, outsider, "ТЕСТ Bloklangan loyiha"),
+            (worker, worker, "ТЕСТ Bloklangan oʻzimniki"),
+            (chief, head, "ТЕСТ Bloklangan boshliq"),
+        ):
+            task = await task_service.create_task(
+                session, creator=creator, assignee=assignee, title=title,
+                due_at=ASKED + timedelta(days=2),
+            )
+            task.status = TaskStatus.BLOCKED
+
+        for author, responsible in (
+            (cast.chief, cast.worker),
+            (cast.chief, cast.outsider),
+            (cast.worker, cast.worker),
+        ):
+            session.add(Decision(
+                organization_id=cast.org, title="ТЕСТ Bekor qilingan qaror",
+                author_id=author, responsible_id=responsible,
+                status="CANCELLED",
+            ))
+
+        for index, owner in enumerate((cast.chief, cast.outsider, cast.head)):
+            meeting = Meeting(
+                organization_id=cast.org, owner_id=owner, created_by=owner,
+                title="ТЕСТ Tasdiqlangan uchrashuv",
+                start_at=ASKED + timedelta(days=10 + index),
+                end_at=ASKED + timedelta(days=10 + index, hours=1),
+                status=MeetingStatus.CONFIRMED,
+            )
+            session.add(meeting)
+            await session.flush()
+            if owner == cast.chief:
+                session.add(MeetingParticipant(
+                    meeting_id=meeting.id, user_id=cast.worker, created_at=ASKED,
+                ))
+
+
+async def _ask_matrix(cast: Cast) -> None:
+    print("\n16.5. Матрица «запись × человек»: ответ совпадает с правом на карточку")
+    people = (
+        ("руководитель", cast.chief),
+        ("начальник отдела", cast.head),
+        ("сотрудник", cast.worker),
+        ("сотрудник чужого отдела", cast.outsider),
+    )
+    seen: dict[str, tuple[frozenset, frozenset, frozenset]] = {}
+
+    for title, who in people:
+        async with session_scope() as session:
+            viewer = await session.get(User, who)
+            grants = await load_grants(session, viewer)
+
+            # ── Поручения: сверка с access_for, а не с тем же visible_filter.
+            rows = list((await session.execute(
+                select(Task).where(
+                    Task.organization_id == cast.org, Task.status == TaskStatus.BLOCKED
+                )
+            )).scalars().all())
+            check(len(rows) <= questions.MAX_ROWS,
+                  f"{title}: поручений матрицы не больше предела показа", str(len(rows)))
+            expected = {
+                row.id for row in rows
+                if (await task_service.access_for(session, row, viewer, grants)).can_view
+            }
+            found = await questions.run(
+                session, questions.Filter(kind="task", status="BLOCKED"),
+                viewer=viewer, grants=grants, now=ASKED,
+            )
+            actual = {hit.id for hit in found.hits}
+            check(actual == expected, f"{title}: поручения совпали с правом на карточку",
+                  f"{sorted(actual)} ≠ {sorted(expected)}")
+            tasks_seen = frozenset(actual)
+
+            # ── Решения: сверка с may_read.
+            rows = list((await session.execute(
+                select(Decision).where(
+                    Decision.organization_id == cast.org,
+                    Decision.status == "CANCELLED",
+                )
+            )).scalars().all())
+            expected = set()
+            for row in rows:
+                if await decisions.may_read(session, decision=row, viewer=viewer):
+                    expected.add(row.id)
+            found = await questions.run(
+                session, questions.Filter(kind="decision", status="CANCELLED"),
+                viewer=viewer, grants=grants, now=ASKED,
+            )
+            actual = {hit.id for hit in found.hits}
+            check(actual == expected, f"{title}: решения совпали с правом на карточку",
+                  f"{sorted(actual)} ≠ {sorted(expected)}")
+            decisions_seen = frozenset(actual)
+
+            # ── Встречи: сверка с may_read.
+            rows = list((await session.execute(
+                select(Meeting).where(
+                    Meeting.organization_id == cast.org,
+                    Meeting.status == MeetingStatus.CONFIRMED,
+                )
+            )).scalars().all())
+            expected = set()
+            for row in rows:
+                if await meeting_service.may_read(session, meeting=row, viewer=viewer):
+                    expected.add(row.id)
+            found = await questions.run(
+                session, questions.Filter(kind="meeting", status=MeetingStatus.CONFIRMED),
+                viewer=viewer, grants=grants, now=ASKED,
+            )
+            actual = {hit.id for hit in found.hits}
+            check(actual == expected, f"{title}: встречи совпали с правом на карточку",
+                  f"{sorted(actual)} ≠ {sorted(expected)}")
+            meetings_seen = frozenset(actual)
+
+        seen[title] = (tasks_seen, decisions_seen, meetings_seen)
+
+    # Матрица, в которой всем видно одно и то же, не проверяет прав: совпасть
+    # с пустотой легко. Проверяем, что области действительно разные.
+    chief_tasks = seen["руководитель"][0]
+    check(len(chief_tasks) >= 4, "руководителю видны все поручения матрицы",
+          str(len(chief_tasks)))
+    check(seen["сотрудник"][0] < chief_tasks, "сотруднику — только часть",
+          str(sorted(seen["сотрудник"][0])))
+    check(seen["сотрудник чужого отдела"][0] != seen["сотрудник"][0],
+          "и разным людям видно разное")
+    # Середина между «всё» и «своё» — область отдела. Промахивается обычно она.
+    head_tasks = seen["начальник отдела"][0]
+    check(seen["сотрудник"][0] < head_tasks < chief_tasks,
+          "начальнику отдела видно больше своего, но не всё",
+          f"{sorted(head_tasks)} из {sorted(chief_tasks)}")
+
+
+async def _ask_foreign(cast: Cast) -> None:
+    print("\n16.6. Спросивший про чужой отдел получает пустоту, а не отказ")
+    raw = {"kind": "task", "status": "blocked", "department": "Loyihalar"}
+
+    async with session_scope() as session:
+        viewer = await session.get(User, cast.worker)
+        grants = await load_grants(session, viewer)
+        item = await questions.resolve(session, raw, viewer=viewer, grants=grants)
+        found = await questions.run(
+            session, item, viewer=viewer, grants=grants, now=ASKED
+        )
+        # В чужом отделе записи есть: без этого пустой ответ ничего не доказывал бы.
+        exists = await session.scalar(select(func.count(Task.id)).where(
+            Task.organization_id == cast.org,
+            Task.department_id == cast.projects,
+            Task.status == TaskStatus.BLOCKED,
+        ))
+    check(int(exists or 0) > 0, "в чужом отделе записи есть", str(exists))
+    check(item.possible, "вопрос выполнимый: отдел нашёлся, отказа нет")
+    check(item.department_id == cast.projects, "и это именно чужой отдел")
+    check(found.empty, "а ответ пуст — ни строки, ни намёка")
+
+    # То же для начальника отдела: своя область есть, чужая — нет.
+    async with session_scope() as session:
+        head = await session.get(User, cast.head)
+        grants = await load_grants(session, head)
+        item = await questions.resolve(session, raw, viewer=head, grants=grants)
+        alien = await questions.run(session, item, viewer=head, grants=grants, now=ASKED)
+        item = await questions.resolve(
+            session, {"kind": "task", "status": "blocked", "department": "Moliya"},
+            viewer=head, grants=grants,
+        )
+        own = await questions.run(session, item, viewer=head, grants=grants, now=ASKED)
+    check(alien.empty, "начальнику отдела чужой отдел тоже пуст")
+    check(not own.empty, "а свой — нет: пустота именно от прав", str(len(own.hits)))
+
+    # Проверка не «фильтр по отделу всегда пуст»: у руководителя он находит.
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        item = await questions.resolve(session, raw, viewer=chief, grants=grants)
+        allowed = await questions.run(
+            session, item, viewer=chief, grants=grants, now=ASKED
+        )
+    check(not allowed.empty, "руководителю тот же вопрос отвечает записями",
+          str(len(allowed.hits)))
+
+    # Невыполнимый фильтр не выполняется вовсе. Пара сравнивается на одном
+    # и том же вопросе: иначе «пусто» доказывало бы только, что записей нет.
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        grants = await load_grants(session, chief)
+        plain = questions.Filter(kind="task", status="BLOCKED")
+        able = await questions.run(session, plain, viewer=chief, grants=grants, now=ASKED)
+        unable = await questions.run(
+            session, questions.Filter(kind="task", status="BLOCKED", possible=False),
+            viewer=chief, grants=grants, now=ASKED,
+        )
+    check(not able.empty, "выполнимый вопрос отвечает записями", str(len(able.hits)))
+    check(unable.empty, "а невыполнимый — пуст, тот же вопрос и те же права")
+
+
+async def _ask_no_writes(cast: Cast) -> None:
+    print("\n16.7. Вопрос ничего не создаёт и ничего не выполняет")
+    before = await _all_counts(cast.org)
+    for reply in (
+        '{"kind":"task","sql":"DROP TABLE tasks"}',
+        '{"kind":"task","department":"\'; DROP TABLE tasks; --"}',
+        '{"kind":"task","status":"blocked; delete from tasks"}',
+        '{"kind":"task","person":"%\' OR 1=1 --"}',
+        '{"kind":"decision","status":"cancelled","person":"_"}',
+    ):
+        await _asked(cast, cast.chief, reply)
+    after = await _all_counts(cast.org)
+    check(before == after, "после вопросов записей столько же", f"{before} → {after}")
+    check(after[0] > 0, "и таблицы на месте — счёт выполнился", str(after))
+
+    # Подставленное в название условие остаётся названием: находить по нему
+    # нечего, и ответ пуст, а не «все поручения».
+    injected = await _asked(
+        cast, cast.chief, '{"kind":"task","department":"\'; DROP TABLE tasks; --"}'
+    )
+    check(injected.empty, "подставленный текст запроса ничего не выбирает")
+
+
+async def _ask_limit(cast: Cast) -> None:
+    print("\n16.8. Сколько строк показывать, решает система")
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        worker = await session.get(User, cast.worker)
+        for number in range(questions.MAX_ROWS + 2):
+            await task_service.create_task(
+                session, creator=chief, assignee=worker,
+                title=f"ТЕСТ Shoshilinch {number}",
+                priority=Priority.CRITICAL, due_at=ASKED + timedelta(days=3),
+            )
+
+    many = await _asked(
+        cast, cast.chief, '{"kind":"task","priority":"critical","limit":1000}'
+    )
+    check(len(many.hits) == questions.MAX_ROWS,
+          "показано ровно столько, сколько решила система", str(len(many.hits)))
+    check(many.more, "и сказано, что показано не всё")
+
+    # Обратное так же важно: когда всё поместилось, «показано не всё» лишнее.
+    few = await _asked(cast, cast.chief, '{"kind":"task","status":"blocked"}')
+    check(not few.more, "уместившийся ответ не притворяется урезанным",
+          str(len(few.hits)))
+    check(0 < len(few.hits) < questions.MAX_ROWS, "и он не пуст", str(len(few.hits)))
+
+
+async def _ask_fallback(cast: Cast) -> None:
+    print("\n16.9. Непонятый вопрос ищет по словам, а не показывает всё")
+    unread = await _asked(cast, cast.chief, "не знаю, о чём вы")
+    check(unread.searched, "не разобрав, сценарий пошёл в поиск")
+    check(unread.filter is None, "и фильтра не сочинил")
+    check(unread.reason == "empty", "причина записана", unread.reason)
+
+    vague = await _asked(cast, cast.chief, '{"kind":"task"}')
+    check(vague.searched, "фильтр без условий ответом не считается")
+    check(vague.reason == "vague", "и причина у него другая", vague.reason)
+
+    # Выключенный ИИ: вопрос отвечает хуже, но отвечает.
+    settings.ai_enabled = False
+    async with session_scope() as session:
+        before = await session.scalar(
+            select(func.count(AiCall.id)).where(AiCall.organization_id == cast.org)
+        )
+    off = await _asked(
+        cast, cast.chief, '{"kind":"task","status":"blocked"}', text="Bloklangan"
+    )
+    async with session_scope() as session:
+        after = await session.scalar(
+            select(func.count(AiCall.id)).where(AiCall.organization_id == cast.org)
+        )
+    check(off.searched, "при выключенном ИИ вопрос уходит в поиск по словам")
+    check(off.reason == "off", "и причина названа", off.reason)
+    check(before == after, "обращения к модели не было", f"{before} → {after}")
+    check(not off.empty, "но ответ есть: поиск по словам нашёл", str(len(off.hits)))
+
+    # Откат к поиску идёт теми же условиями видимости: чужое не показывается.
+    denied = await _asked(cast, cast.outsider, "не знаю", text="Bloklangan moliya")
+    check(all(hit.kind != "task" for hit in denied.hits),
+          "и в поиске по словам чужое поручение не появляется",
+          str([(h.kind, h.title) for h in denied.hits]))
+    settings.ai_enabled = True
+
+
+async def _ask_overdue(cast: Cast) -> None:
+    print("\n16.11. Просрочка в ответе считается тем же правилом, что и в сводке")
+    # Три поручения на один вопрос: просроченное, выполненное с прошедшим
+    # сроком и вовсе без срока. Правило обязано выбрать ровно первое.
+    async with session_scope() as session:
+        chief = await session.get(User, cast.chief)
+        worker = await session.get(User, cast.worker)
+        late = await task_service.create_task(
+            session, creator=chief, assignee=worker, title="ТЕСТ Kechikkan",
+            priority=Priority.LOW, due_at=ASKED - timedelta(days=3),
+        )
+        done = await task_service.create_task(
+            session, creator=chief, assignee=worker, title="ТЕСТ Bajarilgan",
+            priority=Priority.LOW, due_at=ASKED - timedelta(days=3),
+        )
+        done.status = TaskStatus.DONE
+        await task_service.create_task(
+            session, creator=chief, assignee=worker, title="ТЕСТ Muddatsiz",
+            priority=Priority.LOW,
+        )
+        late_id, done_id = late.id, done.id
+
+    answer = await _asked(
+        cast, cast.chief, '{"kind":"task","overdue":true,"priority":"low"}'
+    )
+    found = {hit.id for hit in answer.hits}
+    check(found == {late_id}, "просрочено ровно одно из трёх",
+          f"{sorted(found)} вместо [{late_id}]")
+    check(done_id not in found,
+          "выполненное с прошедшим сроком просроченным не считается")
+    check(len(answer.hits) == 1, "и поручение без срока не просрочено никогда",
+          str(len(answer.hits)))
+
+    # Обратное: без просрочки тот же вопрос находит все три.
+    plain = await _asked(cast, cast.chief, '{"kind":"task","priority":"low"}')
+    check(len(plain.hits) == 3, "без условия просрочки видны все три",
+          str(len(plain.hits)))
+
+
+def _ask_one_rule() -> None:
+    print("\n16.12. Правило просрочки описано в одном месте")
+    # Вопрос стал третьим, кто спрашивает «что просрочено», — после сводки
+    # и контроля сроков. Пока описаний было два, они совпадали случайно;
+    # третья копия разошлась бы, и первым признаком стало бы расхождение
+    # чисел в сводке и в ответе на вопрос — то есть недоверие ко всему.
+    root = Path(__file__).resolve().parents[1] / "app"
+    def files_with(needle: str) -> list[str]:
+        return sorted(
+            str(path.relative_to(root.parent))
+            for path in root.rglob("*.py")
+            if needle in path.read_text(encoding="utf-8")
+        )
+
+    check(files_with("PENDING_STATUSES = (") == ["app/services/tasks.py"],
+          "статусы ожидания перечислены один раз",
+          str(files_with("PENDING_STATUSES = (")))
+    check(files_with("Decision.due_date <") == ["app/services/decisions.py"],
+          "и просрочка решения описана один раз",
+          str(files_with("Decision.due_date <")))
+    # Пользуются им при этом несколько мест — иначе описание одно потому,
+    # что никому не нужно, а не потому что общее.
+    uses = sum(
+        path.read_text(encoding="utf-8").count("overdue_filter(now)")
+        for path in root.rglob("*.py")
+    )
+    check(uses >= 4, "и общим правилом пользуются сводка, реестр и вопрос", str(uses))
+
+
+async def _ask_journal(cast: Cast) -> None:
+    print("\n16.10. Вопрос записан в журнал")
+    async with session_scope() as session:
+        await session.execute(delete(AiCall).where(AiCall.organization_id == cast.org))
+    await _asked(cast, cast.chief, '{"kind":"task","status":"blocked"}')
+    async with session_scope() as session:
+        row = (await session.execute(
+            select(AiCall).where(AiCall.organization_id == cast.org)
+        )).scalars().one()
+    check(row.kind == "ask", "вид вызова записан", row.kind)
+    check(row.prompt_version == "ask-1", "версия промпта записана", row.prompt_version)
+    check(row.model == settings.ai_model_routine, "вопрос идёт рутинной моделью",
+          row.model)
+    check(row.user_id == cast.chief, "и видно, кто спросил", str(row.user_id))
+    check(row.ok and row.finished_at is not None, "вызов записан завершённым")
+    # Подтверждать нечего: вопрос ничего не предлагает записать. Отметка
+    # «не подтверждено» означала бы отказ человека, которого не было.
+    check(row.confirmed is None, "подтверждения у вопроса нет и в журнале",
+          str(row.confirmed))
 
 
 if __name__ == "__main__":

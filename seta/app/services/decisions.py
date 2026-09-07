@@ -293,6 +293,19 @@ async def may_read(session: AsyncSession, *, decision: Decision, viewer: User) -
     return mine
 
 
+def overdue_filter(now: datetime) -> list:
+    """Условие «решение просрочено» — одним описанием, как и у поручений.
+
+    Открыто, срок задан, срок прошёл. Закрытое решение с прошедшим сроком
+    не просрочено, и решение без срока не просрочено никогда.
+    """
+    return [
+        Decision.status == DecisionStatus.OPEN,
+        Decision.due_date.is_not(None),
+        Decision.due_date < now,
+    ]
+
+
 def visible_filter(
     user: User, grants: dict[str, Grant], visible_departments: set[int]
 ) -> list:
